@@ -680,6 +680,8 @@ def run_grid_trading_bot(AMOUNT):
                                 logging.info(f"Placed missing Buy order at {new_buy_price:.4f}")
                             else:
                                 logging.warning(f"Failed to place Buy order at {new_buy_price:.4f}.")
+                                return
+                                
                         except Exception as e:
                             logging.error(f"Error placing buy order at {new_buy_price}: {e}")
                     else:
@@ -696,6 +698,8 @@ def run_grid_trading_bot(AMOUNT):
                                 logging.info(f"Placed missing Sell order at {new_sell_price:.4f}")
                             else:
                                 logging.warning(f"Failed to place Sell order at {new_sell_price:.4f}.")
+                                return
+                                
                         except Exception as e:
                             logging.error(f"Error placing sell order at {new_sell_price}: {e}")
                     else:
