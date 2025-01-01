@@ -17,6 +17,8 @@ logging.basicConfig(
 )
 
 
+
+
 # 1. ---------------------- Static / Global configuration ----------------------
 ENABLE_DEMO_MODE = False  # Toggle for mockup data during testing
 mock_order_counter = 0
@@ -39,19 +41,38 @@ GRID_COUNT = 10
 # How often to update (seconds)
 UPDATE_INTERVAL = 300
 
+# Στατική μεταβλητή για τη διαδρομή του JSON αρχείου
+JSON_PATH = "/opt/python/grid-trading-bot/config.json"
 
 
 
-# Binance API Keys (Replace with your actual keys)
-API_KEY = 'dEiaQM91ppzuEvEiUqQTBSWNQRGXPuFsQpD0JGhVzb1FImgTX0dTOgKKKIjMBCYb'
-API_SECRET = '5Q04l2nLTktyi3I3B7uc8tbMS55Okay7oCMJXtm5ZnL0AjyuJA90A0kWIZyoHtt0'
+
+# 2. ---------------------- Load Keys from external file ----------------------
+def load_keys():
+    """Load API credentials from a JSON file."""
+    try:
+        with open(JSON_PATH, "r") as file:
+            keys = json.load(file)
+            api_key = keys.get("API_KEY")
+            api_secret = keys.get("API_SECRET")
+
+            if not api_key or not api_secret:
+                raise ValueError("API_KEY or API_SECRET is missing in the JSON file.")
+
+            return api_key, api_secret
+    except FileNotFoundError:
+        raise FileNotFoundError(f"The specified JSON file '{JSON_PATH}' was not found.")
+    except json.JSONDecodeError:
+        raise ValueError(f"The JSON file '{JSON_PATH}' is not properly formatted.")
 
 
-    
+
+# Load API_KEY and API_SECRET from the JSON file
+API_KEY, API_SECRET = load_keys()    
              
 
 
-# 2. ---------------------- Initialize Exchange ----------------------
+# 3. ---------------------- Initialize Exchange ----------------------
 def initialize_exchange():
     try:
         exchange = getattr(ccxt, EXCHANGE_NAME)({
@@ -78,7 +99,7 @@ def get_current_price(exchange):
 
 
 
-# 3. ---------------------- Order Placement / Cancel ----------------------
+# 4. ---------------------- Order Placement / Cancel ----------------------
 def save_open_orders_to_file(file_path, open_orders, silent=False):
     try:
         orders_to_save = {}
@@ -284,7 +305,7 @@ def get_order_status(exchange, order_id):
 
 
 
-# 4. ---------------------- Check Orders Status ----------------------
+# 5. ---------------------- Check Orders Status ----------------------
 def check_orders_status(exchange, open_orders, current_price):
     """
     Ελέγχει την κατάσταση των τοπικών παραγγελιών και ενημερώνει τα open_orders αν μια παραγγελία έχει γεμίσει.
@@ -434,7 +455,7 @@ def reconcile_open_orders(exchange, symbol, local_orders):
 
 
 
-# 5. ---------------------- Main Bot Logic ----------------------
+# 6. ---------------------- Main Bot Logic ----------------------
 def run_grid_trading_bot(AMOUNT):
     logging.info(f">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
     logging.info(f"Starting {SYMBOL} Grid Trading bot...")
