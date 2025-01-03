@@ -1,8 +1,12 @@
+from datetime import datetime
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 import ccxt
 import time
 import logging
 import json
 import os
+import pushover
 
 
 
@@ -34,32 +38,60 @@ CRYPTO_CURRENCY = 'USDT'
 
 # Number of grid levels
 GRID_SIZE = 0.043
-# AMOUNT of BTC/USDT per order
+# AMOUNT of pair per order
 AMOUNT = 50
 # Number of grids above and below current price
-GRID_COUNT = 10  
+GRID_COUNT = 10
 # How often to update (seconds)
 UPDATE_INTERVAL = 300
 
 # Στατική μεταβλητή για τη διαδρομή του JSON αρχείου
 JSON_PATH = "/opt/python/grid-trading-bot/config.json"
 
+# Παράμετροι Αποστολής E-mail
+ENABLE_EMAIL_NOTIFICATIONS = True
+ENABLE_PUSH_NOTIFICATIONS = True
+
 
 
 
 # 2. ---------------------- Load Keys from external file ----------------------
 def load_keys():
-    """Load API credentials from a JSON file."""
+    """Load API credentials and notification settings from a JSON file."""
     try:
         with open(JSON_PATH, "r") as file:
             keys = json.load(file)
+            
+            # Απαραίτητα κλειδιά για το API
             api_key = keys.get("API_KEY")
             api_secret = keys.get("API_SECRET")
+            
+            # Κλειδιά για ειδοποιήσεις
+            sendgrid_api_key = keys.get("SENDGRID_API_KEY")
+            pushover_token = keys.get("PUSHOVER_TOKEN")
+            pushover_user = keys.get("PUSHOVER_USER")
+            email_sender = keys.get("EMAIL_SENDER")
+            email_recipient = keys.get("EMAIL_RECIPIENT")
 
+            # Έλεγχος για κενές τιμές
+            missing_keys = []
             if not api_key or not api_secret:
-                raise ValueError("API_KEY or API_SECRET is missing in the JSON file.")
+                missing_keys.extend(["API_KEY", "API_SECRET"])
+            if not sendgrid_api_key:
+                missing_keys.append("SENDGRID_API_KEY")
+            if not pushover_token:
+                missing_keys.append("PUSHOVER_TOKEN")
+            if not pushover_user:
+                missing_keys.append("PUSHOVER_USER")
+            if not email_sender:
+                missing_keys.append("EMAIL_SENDER")
+            if not email_recipient:
+                missing_keys.append("EMAIL_RECIPIENT")
+            
+            if missing_keys:
+                raise ValueError(f"Missing keys in the JSON file: {', '.join(missing_keys)}")
 
-            return api_key, api_secret
+            return api_key, api_secret, sendgrid_api_key, pushover_token, pushover_user, email_sender, email_recipient
     except FileNotFoundError:
         raise FileNotFoundError(f"The specified JSON file '{JSON_PATH}' was not found.")
     except json.JSONDecodeError:
@@ -67,12 +99,101 @@ def load_keys():
 
 
 
+
 # Load API_KEY and API_SECRET from the JSON file
-API_KEY, API_SECRET = load_keys()    
+API_KEY, API_SECRET, SENDGRID_API_KEY, PUSHOVER_TOKEN, PUSHOVER_USER, EMAIL_SENDER, EMAIL_RECIPIENT = load_keys()
              
 
 
-# 3. ---------------------- Initialize Exchange ----------------------
+
+
+
+# 3. ---------------------- Notifications ----------------------
+def send_push_notification(message, log_to_file=True):
+    """
+    Στέλνει push notification μέσω Pushover.
+
+    Args:
+        message (str): Το μήνυμα που θα σταλεί.
+        log_to_file (bool): Αν είναι True, καταγράφει το μήνυμα στο log αρχείο.
+    """
+    if not ENABLE_PUSH_NOTIFICATIONS:
+        if log_to_file:
+            logging.info("Push notifications are paused. Notification was not sent.")
+        return
+
+    try:
+        # Αποστολή push notification μέσω Pushover
+        po = pushover.Client(user_key=PUSHOVER_USER, api_token=PUSHOVER_TOKEN)
+        po.send_message(message, title="Grid Bot Alert")
+        
+        if log_to_file:
+            logging.info("Push notification sent successfully!")
+    except Exception as e:
+        if log_to_file:
+            logging.error(f"Error sending push notification: {e}")
+
+
+
+
+
+def sendgrid_email(transaction_type, price, quantity, net_profit=None, final_score=None, reasoning=None):
+    """
+    Στέλνει email μέσω SendGrid για ενέργειες του grid bot.
+
+    Args:
+        transaction_type (str): 'buy' ή 'sell'.
+        price (float): Η τιμή της συναλλαγής.
+        quantity (float): Η ποσότητα της συναλλαγής.
+        net_profit (float, optional): Καθαρό κέρδος (μόνο για πωλήσεις).
+        final_score (float, optional): Βαθμολογία συναλλαγής.
+        reasoning (str, optional): Αιτιολόγηση συναλλαγής.
+    """
+    if not ENABLE_EMAIL_NOTIFICATIONS:
+        logging.info("Email notifications are paused. Email was not sent.")
+        return
+
+    # Δημιουργία περιεχομένου email
+    transaction = "Αγορά" if transaction_type == 'buy' else "Πώληση"
+    current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
+    html_content = f"""
+        Πραγματοποιήθηκε <strong>{transaction} {CRYPTO_SYMBOL}</strong>.<br>
+        Τεμάχια: {quantity}<br>
+        Τιμή: {round(price, 2)} {CRYPTO_CURRENCY}<br>
+        Ημερομηνία: {current_time}<br>
+    """
+
+    if final_score is not None:
+        html_content += f"Βαθμολογία: {final_score}<br>"
+    if reasoning:
+        html_content += f"Αιτιολόγηση: {reasoning}<br>"
+    if transaction_type == 'sell' and net_profit is not None:
+        html_content += f"Καθαρό Κέρδος: {round(net_profit, 2)} {CRYPTO_CURRENCY}<br>"
+    if ENABLE_DEMO_MODE:
+        html_content += """
+            <div style="border: 2px solid red; padding: 10px; margin-top: 20px;">
+                <strong>DEMO MODE:</strong> Αυτή είναι μια προσομοίωση. Καμία πραγματική συναλλαγή δεν έχει εκτελεστεί.
+            </div>
+        """
+
+    message = Mail(
+        from_email=EMAIL_SENDER,
+        to_emails=EMAIL_RECIPIENT,
+        subject=f'Grid Bot - {transaction} {CRYPTO_SYMBOL}',
+        html_content=html_content
+    )
+
+    try:
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        sg.send(message)
+        logging.info("Email sent successfully!")
+    except Exception as e:
+        logging.error(f"Error sending email: {e}")
+
+
+
+
+# 4. ---------------------- Initialize Exchange ----------------------
 def initialize_exchange():
     try:
         exchange = getattr(ccxt, EXCHANGE_NAME)({
@@ -99,7 +220,7 @@ def get_current_price(exchange):
 
 
 
-# 4. ---------------------- Order Placement / Cancel ----------------------
+# 5. ---------------------- Order Placement / Cancel ----------------------
 def save_open_orders_to_file(file_path, open_orders, silent=False):
     try:
         orders_to_save = {}
@@ -196,6 +317,7 @@ def check_balance(exchange, currency, required_amount):
 def place_order(exchange, side, price, AMOUNT):
     global mock_order_counter
     rounded_price = round(price, 4)  # Στρογγυλοποίηση τιμής
+    
     if ENABLE_DEMO_MODE:
         # Mock mode: Δημιουργία mock παραγγελίας
         mock_order_counter += 1
@@ -212,8 +334,33 @@ def place_order(exchange, side, price, AMOUNT):
         logging.info(f"[DEMO MODE] Mock order placed: {mock_order}")
         return mock_order
 
+
+
+    # Έλεγχος υπολοίπου πριν από την τοποθέτηση παραγγελίας
     try:
-        # Τοποθέτηση παραγγελίας στην ανταλλαγή
+        balance = exchange.fetch_balance()
+        required_currency = CRYPTO_CURRENCY if side == "buy" else CRYPTO_SYMBOL
+        available_balance = balance['free'].get(required_currency, 0)
+
+        if available_balance < AMOUNT:
+            logging.warning(f"Insufficient balance for {side.capitalize()} order at {rounded_price:.4f}. "
+                            f"Available: {available_balance}, Required: {AMOUNT}. Skipping order.")
+            sendgrid_email(
+                transaction_type=side,
+                price=rounded_price,
+                quantity=AMOUNT,
+                reasoning=f"Insufficient balance for {side.capitalize()} order at {rounded_price:.4f}"
+            )
+            send_push_notification(f"Insufficient balance for {side.capitalize()} order at {rounded_price:.4f}")
+            return False
+            
+    except Exception as e:
+        logging.error(f"Error checking balance: {e}")
+        return False
+
+
+    # Τοποθέτηση παραγγελίας
+    try:
         logging.info(f"Attempting to place {side} order at {rounded_price:.4f} {CRYPTO_CURRENCY} for {AMOUNT} {CRYPTO_SYMBOL}")
         order = exchange.create_limit_order(SYMBOL, side, AMOUNT, rounded_price)
         logging.info(f"Order placed successfully: {order}")
@@ -238,7 +385,6 @@ def place_order(exchange, side, price, AMOUNT):
 
 
 
-
 def verify_order_exists(exchange, order_id):
     try:
         order = exchange.fetch_order(order_id, SYMBOL)
@@ -246,7 +392,6 @@ def verify_order_exists(exchange, order_id):
     except Exception as e:
         logging.debug(f"Order {order_id} verification failed: {e}")
         return False
-
 
 
 
@@ -305,7 +450,7 @@ def get_order_status(exchange, order_id):
 
 
 
-# 5. ---------------------- Check Orders Status ----------------------
+# 6. ---------------------- Check Orders Status ----------------------
 def check_orders_status(exchange, open_orders, current_price):
     """
     Ελέγχει την κατάσταση των τοπικών παραγγελιών και ενημερώνει τα open_orders αν μια παραγγελία έχει γεμίσει.
@@ -342,6 +487,8 @@ def check_orders_status(exchange, open_orders, current_price):
                 if status in ["closed", "filled"]:
                     logging.info(f"Order at {rounded_price:.4f} filled.")
                     filled_orders.append(rounded_price)
+                    send_push_notification(f"Order Filled at {rounded_price:.4f}")
+                    
                 elif status == "open":
                     logging.debug(f"Order {order_id} at {rounded_price:.4f} is still active.")
                 elif status in ["canceled", "rejected", "expired"]:
@@ -365,12 +512,6 @@ def check_orders_status(exchange, open_orders, current_price):
     
 
     return filled_orders
-
-
-
-
-
-
 
 
 
@@ -446,16 +587,7 @@ def reconcile_open_orders(exchange, symbol, local_orders):
 
 
 
-
-
-
-
-
-
-
-
-
-# 6. ---------------------- Main Bot Logic ----------------------
+# 7. ---------------------- Main Bot Logic ----------------------
 def run_grid_trading_bot(AMOUNT):
     logging.info(f">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
     logging.info(f"Starting {SYMBOL} Grid Trading bot...")
@@ -489,30 +621,59 @@ def run_grid_trading_bot(AMOUNT):
 
 
 
+    
+    
     # Αρχική τοποθέτηση εντολών (buy / sell) μόνο αν δεν υπάρχουν ήδη εντολές
     if not open_orders:
         logging.info("No existing open orders. Placing initial grid orders.")
+        all_orders_successful = True  # Flag για επιτυχία τοποθέτησης όλων των παραγγελιών
+
         for price in buy_prices:
-            if price > 0:  # λίγο έλεγχος ότι δεν πάμε σε απίθανη αρνητική τιμή
+            if price > 0:  # Λίγο έλεγχος ότι δεν πάμε σε απίθανη αρνητική τιμή
                 order = place_order(exchange, "buy", price, AMOUNT)
-                open_orders[price] = order
+                if order:
+                    open_orders[price] = order
+                else:
+                    logging.error(f"Stopping initial grid setup due to issue at buy price {price:.4f}.")
+                    all_orders_successful = False
+                    return
 
-        for price in sell_prices:
-            order = place_order(exchange, "sell", price, AMOUNT)
-            open_orders[price] = order
+        if all_orders_successful:  # Μόνο αν όλες οι αγορές ήταν επιτυχείς
+            for price in sell_prices:
+                order = place_order(exchange, "sell", price, AMOUNT)
+                if order:
+                    open_orders[price] = order
+                else:
+                    logging.error(f"Stopping initial grid setup due to issue at sell price {price:.4f}.")
+                    all_orders_successful = False
+                    return
 
-        # Αποθήκευση αρχικών εντολών
-        save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders)
-        logging.info(f"Initial orders placed and saved: {open_orders}")
+        # Αποθήκευση μόνο αν όλες οι παραγγελίες τοποθετήθηκαν επιτυχώς
+        if all_orders_successful:
+            save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders)
+            logging.info(f"Initial orders placed and saved: {open_orders}")
+            
+            # Send notifications on successful orders
+            send_push_notification(f"Initial orders placed and saved: {open_orders}")          
+                       
+        else:
+            logging.error("Initial grid setup incomplete. Orders not saved.")
+            
+            # Send notifications on failed orders
+            send_push_notification(f"Failed to place initial orders")
+            
+            return
 
-    
+
     # Αρχικοποίηση της local_open_orders πριν το loop
     local_open_orders = {}    
     
+
     # Ξεκινάμε το loop
     while True:
         iteration_start = time.time()
         failed_attempts = 0  # Counter για αποτυχημένες προσπάθειες
+           
         
         try:
             logging.info(f"==========================================================")
@@ -720,8 +881,6 @@ def run_grid_trading_bot(AMOUNT):
         except Exception as e:
             logging.exception(f"Error in grid trading loop: {e}")
             time.sleep(UPDATE_INTERVAL)
-
-
 
 
 
