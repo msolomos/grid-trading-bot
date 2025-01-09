@@ -221,7 +221,7 @@ def get_current_price(exchange):
 
 
 # 5. ---------------------- Order Placement / Cancel ----------------------
-def save_open_orders_to_file(file_path, open_orders, silent=False):
+def save_open_orders_to_file(file_path, open_orders, statistics=None, silent=False):
     try:
         orders_to_save = {}
         for price, order in open_orders.items():
@@ -243,16 +243,27 @@ def save_open_orders_to_file(file_path, open_orders, silent=False):
 
         logging.debug(f"Orders to be saved: {orders_to_save}")
 
+        # Δημιουργία δομής δεδομένων για αποθήκευση
+        data_to_save = {
+            "orders": orders_to_save,
+            "statistics": statistics if statistics else {
+                "total_buys": 0,
+                "total_sells": 0,
+                "net_profit": 0.0
+            }
+        }
+
         # Αποθήκευση σε προσωρινό αρχείο
         temp_file_path = file_path + ".tmp"
         with open(temp_file_path, 'w') as f:
-            json.dump(orders_to_save, f, indent=4)
+            json.dump(data_to_save, f, indent=4)
         os.replace(temp_file_path, file_path)  # Αντικατάσταση του παλιού αρχείου
 
         if not silent:
-            logging.info(f"Saved open orders to {file_path}")
+            logging.info(f"Saved open orders and statistics to {file_path}")
     except Exception as e:
-        logging.error(f"Failed to save open orders to file: {e}")
+        logging.error(f"Failed to save open orders and statistics to file: {e}")
+
 
 
 
@@ -260,15 +271,23 @@ def save_open_orders_to_file(file_path, open_orders, silent=False):
 
 def load_or_fetch_open_orders(exchange, symbol, file_path):
     """
-    Φορτώνει τις ανοιχτές παραγγελίες από το τοπικό αρχείο ή, αν δεν υπάρχει αρχείο, κάνει fetch από την Binance.
+    Φορτώνει τις ανοιχτές παραγγελίες και τις στατιστικές από το τοπικό αρχείο
+    ή, αν δεν υπάρχει αρχείο, κάνει fetch από την Binance.
     """
     try:
         # Προσπάθεια φόρτωσης από το αρχείο
         with open(file_path, 'r') as f:
-            open_orders = json.load(f)
-        open_orders = {float(price): order for price, order in open_orders.items()}
-        logging.info(f"Loaded open orders from {file_path}")
-        return open_orders
+            data = json.load(f)
+        
+        open_orders = {float(price): order for price, order in data.get("orders", {}).items()}
+        statistics = data.get("statistics", {
+            "total_buys": 0,
+            "total_sells": 0,
+            "net_profit": 0.0
+        })
+        
+        logging.info(f"Loaded open orders and statistics from {file_path}")
+        return open_orders, statistics
     except (FileNotFoundError, json.JSONDecodeError):
         # Αν το αρχείο δεν υπάρχει ή είναι κενό/μη έγκυρο, κάνουμε fetch από την Binance
         logging.warning(f"{file_path} not found or invalid. Fetching open orders from Binance...")
@@ -283,13 +302,26 @@ def load_or_fetch_open_orders(exchange, symbol, file_path):
                 'side': order['side'],
                 'status': order['status']
             }
-        # Αποθήκευση των παραγγελιών σε τοπικό αρχείο
-        save_open_orders_to_file(file_path, open_orders)
-        logging.info(f"Fetched and saved open orders to {file_path}")
-        return open_orders
+
+        # Δημιουργία αρχικών στατιστικών
+        statistics = {
+            "total_buys": 0,
+            "total_sells": 0,
+            "net_profit": 0.0
+        }
+
+        # Αποθήκευση των παραγγελιών και των στατιστικών σε τοπικό αρχείο
+        save_open_orders_to_file(file_path, open_orders, statistics)
+        logging.info(f"Fetched and saved open orders and statistics to {file_path}")
+        return open_orders, statistics
     except Exception as e:
-        logging.error(f"Failed to load or fetch open orders: {e}")
-        return {}
+        logging.error(f"Failed to load or fetch open orders and statistics: {e}")
+        return {}, {
+            "total_buys": 0,
+            "total_sells": 0,
+            "net_profit": 0.0
+        }
+
 
 
 
@@ -591,13 +623,27 @@ def reconcile_open_orders(exchange, symbol, local_orders):
 def run_grid_trading_bot(AMOUNT):
     logging.info(f">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
     logging.info(f"Starting {SYMBOL} Grid Trading bot...")
+    
+    # --- NEW CODE ---
+    # Αρχικοποίηση μεταβλητών για καταμέτρηση και κέρδος
+    total_buys = 0
+    total_sells = 0
+    net_profit = 0.0
+    # --- END NEW CODE ---    
 
     exchange = initialize_exchange()
 
-    # Φόρτωση των ανοιχτών εντολών από το αρχείο JSON
-    open_orders = load_or_fetch_open_orders(exchange, SYMBOL, OPEN_ORDERS_FILE)
-    open_orders = {float(k): v for k, v in open_orders.items()}  # Διασφάλιση consistency
-    logging.info(f"Initial open orders: {open_orders}")
+    # Φόρτωση παραγγελιών και στατιστικών από το αρχείο
+    open_orders, statistics = load_or_fetch_open_orders(exchange, SYMBOL, OPEN_ORDERS_FILE)
+    
+    # Διασφάλιση consistency στα open_orders
+    open_orders = {float(k): v for k, v in open_orders.items()}  # Τιμές σε float
+    
+    
+    # Logging αρχικών τιμών
+    logging.info(f"Loaded statistics: {statistics}")
+    logging.info(f"Loaded open orders: {open_orders}")
+    
 
     # Συγχρονισμός με τα πραγματικά open orders από την Binance
     logging.info("Reconciling local open orders with Binance...")
@@ -680,6 +726,14 @@ def run_grid_trading_bot(AMOUNT):
             logging.info(f"Starting a new loop iteration for {CRYPTO_SYMBOL}")
             logging.info(f"==========================================================")
 
+
+            # --- NEW CODE ---
+            # Εμφάνιση συνολικών αγορών, πωλήσεων και κέρδους στην αρχή του iteration
+            logging.info(f"Total Buys: {statistics['total_buys']}, Total Sells: {statistics['total_sells']}, Net Profit: {statistics['net_profit']:.2f}")
+            # --- END NEW CODE ---
+
+
+
             # Λήψη τρέχουσας τιμής
             try:
                 current_price = get_current_price(exchange)
@@ -724,7 +778,24 @@ def run_grid_trading_bot(AMOUNT):
                 if rounded_filled_price in open_orders:
                     order_info = open_orders.pop(rounded_filled_price)
                     side = order_info["side"]
+                    amount = order_info["amount"]
                     new_price = round(rounded_filled_price + (GRID_SIZE if side == "buy" else -GRID_SIZE), 4)
+                    order_price = order_info["price"]  # Τιμή της παραγγελίας (αγοράς ή πώλησης)
+                    
+                    
+                    # --- NEW CODE ---
+                    # Υπολογισμός κέρδους ή ζημίας
+                    if side == "sell":
+                        buy_price = order_price  # Χρησιμοποιούμε την τιμή αγοράς από την παραγγελία
+                        profit = (rounded_filled_price - buy_price) * amount
+                        statistics["total_sells"] += 1
+                        logging.info(f"Profit from Sell Order: {profit:.2f}, Updated Net Profit: {statistics['net_profit']:.2f}")
+                    elif side == "buy":
+                        # Αύξηση total_buys
+                        statistics["total_buys"] += 1
+                    # --- END NEW CODE ---
+
+                    
 
                     # Ελέγχουμε αν η νέα παραγγελία είναι εντός του grid
                     if (side == "buy" and new_price >= min(buy_prices)) or (side == "sell" and new_price <= max(sell_prices)):
@@ -764,53 +835,6 @@ def run_grid_trading_bot(AMOUNT):
 
 
 
-            # Αυτό το block μπορεί να καταργηθεί
-            # Δεν θα αφαιρούμε παραγγελίες εκτός grid
-
-                  
-            # # Αφαίρεση παραγγελιών εκτός grid
-            # prices_to_remove = []
-
-            # # Υπολογισμός ορίων grid για αγορές και πωλήσεις
-            # for price, order_data in open_orders.items():
-                # rounded_price = round(float(price), 4)
-                # try:
-                    # if order_data['side'] == "buy" and rounded_price < min(buy_prices):
-                        # prices_to_remove.append(price)
-                    # elif order_data['side'] == "sell" and rounded_price > max(sell_prices):
-                        # prices_to_remove.append(price)
-                # except Exception as e:
-                    # logging.error(f"Error calculating grid limits for price {rounded_price}: {e}")
-                    # continue
-
-            # # Καταγραφή παραγγελιών που αφαιρούνται
-            # logging.debug(f"Orders to be removed: {prices_to_remove}")
-
-            # for price_to_remove in prices_to_remove:
-                # try:
-                    # rounded_price_to_remove = round(price_to_remove, 4)
-                    # # Ελέγχουμε αν η παραγγελία υπάρχει ακόμα στο exchange
-                    # exchange_orders = fetch_open_orders_from_exchange(exchange, SYMBOL)
-                    # exchange_prices = {round(float(order['price']), 4) for order in exchange_orders}
-
-                    # if rounded_price_to_remove in exchange_prices:
-                        # logging.info(f"Order at {rounded_price_to_remove} is still active on exchange. Skipping removal.")
-                        # continue
-                    
-                    # # Αφαίρεση από τα τοπικά δεδομένα
-                    # if rounded_price_to_remove in open_orders:
-                        # del open_orders[rounded_price_to_remove]
-                        # logging.info(f"Order {rounded_price_to_remove} successfully removed from open_orders.")
-                    # else:
-                        # logging.warning(f"Attempted to remove non-existent order at price {rounded_price_to_remove}.")
-                # except Exception as e:
-                    # logging.error(f"Unexpected error while removing order at price {rounded_price_to_remove}: {e}")
-
-
-
-
-
-
             # Αναπλήρωση ελλείψεων στο grid
             current_buy_orders = list(set(price for price, order in open_orders.items() if order["side"] == "buy"))
             current_sell_orders = list(set(price for price, order in open_orders.items() if order["side"] == "sell"))
@@ -838,6 +862,7 @@ def run_grid_trading_bot(AMOUNT):
                             if order:
                                 open_orders[new_buy_price] = order
                                 current_buy_orders.append(new_buy_price)
+                                statistics["total_buys"] += 1
                                 logging.info(f"Placed missing Buy order at {new_buy_price:.4f}")
                             else:
                                 logging.warning(f"Failed to place Buy order at {new_buy_price:.4f}.")
@@ -856,6 +881,7 @@ def run_grid_trading_bot(AMOUNT):
                             if order:
                                 open_orders[new_sell_price] = order
                                 current_sell_orders.append(new_sell_price)
+                                statistics["total_sells"] += 1
                                 logging.info(f"Placed missing Sell order at {new_sell_price:.4f}")
                             else:
                                 logging.warning(f"Failed to place Sell order at {new_sell_price:.4f}.")
@@ -868,7 +894,10 @@ def run_grid_trading_bot(AMOUNT):
 
 
             logging.debug(f"Open orders to be saved: {open_orders}")
-            save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders, silent=True)
+            
+            # Αποθήκευση ενημερωμένων δεδομένων
+            save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders, statistics, silent=True)
+            
             logging.info("Open orders saved to file.")
            
             # Μετά την ολοκλήρωση του iteration
