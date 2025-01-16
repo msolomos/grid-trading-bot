@@ -328,19 +328,28 @@ def adjust_grid_range():
 
         # Ελέγχουμε αν οι πιο μακρινές παραγγελίες είναι εκτός του grid range
         orders_to_cancel = []
+        new_buy_orders = []
+        new_sell_orders = []        
         
         # Εντοπισμός των παραγγελιών που είναι εκτός του εύρους
         if farthest_buy_order and farthest_buy_order < current_price - (GRID_SIZE * GRID_COUNT):
-            orders_to_cancel.append(next(order for order in open_orders if float(order['price']) == farthest_buy_order))
+            try:
+                order = next(order for order in open_orders if float(order['price']) == farthest_buy_order)
+                orders_to_cancel.append(order)
+            except Exception as e:
+                logging.error(f"Error finding farthest buy order: {e}")
         if farthest_sell_order and farthest_sell_order > current_price + (GRID_SIZE * GRID_COUNT):
-            orders_to_cancel.append(next(order for order in open_orders if float(order['price']) == farthest_sell_order))
-
+            try:
+                order = next(order for order in open_orders if float(order['price']) == farthest_sell_order)
+                orders_to_cancel.append(order)
+            except Exception as e:
+                logging.error(f"Error finding farthest sell order: {e}")
 
         logging.info(f"Orders to cancel: {len(orders_to_cancel)}")
-        logging.info(f"Orders to cancel: {[order['price'] for order in orders_to_cancel]}")
+        logging.info(f"Orders to cancel (prices): {[order['price'] for order in orders_to_cancel if isinstance(order, dict)]}")
 
 
-#############################################################################################################################################################################
+        
 
 
         if orders_to_cancel:
@@ -349,8 +358,7 @@ def adjust_grid_range():
             logging.info(f"Canceled {len(canceled_orders)} orders.")
             logging.info(f"Canceled orders details: {canceled_orders}")
 
-            new_buy_orders = []
-            new_sell_orders = []
+            
 
             try:
                 # Process canceled orders
@@ -371,16 +379,12 @@ def adjust_grid_range():
                             logging.info(f"Preparing to place new buy order at price: {price}")
                             try:
                                 new_order = exchange.create_limit_buy_order(SYMBOL, AMOUNT, price)
-                                logging.info(f"Raw new_order response for buy: {new_order}")
+                                logging.info(f"Raw response from create_limit_buy_order: {new_order}")
                                 if isinstance(new_order, dict) and 'id' in new_order and 'price' in new_order:
-                                    # Validate types
-                                    if not isinstance(new_order['id'], str) or not isinstance(new_order['price'], (float, int)):
-                                        logging.error(f"Unexpected types in new_order for buy: {new_order}")
-                                        continue
                                     logging.info(f"Placed new buy order successfully: {new_order}")
                                     new_buy_orders.append({
                                         "id": new_order['id'],
-                                        "price": float(new_order['price']),  # Ensure proper type
+                                        "price": new_order['price'],
                                         "side": "buy",
                                     })
                                 else:
@@ -396,16 +400,12 @@ def adjust_grid_range():
                             logging.info(f"Preparing to place new sell order at price: {price}")
                             try:
                                 new_order = exchange.create_limit_sell_order(SYMBOL, AMOUNT, price)
-                                logging.info(f"Raw new_order response for sell: {new_order}")
+                                logging.info(f"Raw response from create_limit_sell_order: {new_order}")
                                 if isinstance(new_order, dict) and 'id' in new_order and 'price' in new_order:
-                                    # Validate types
-                                    if not isinstance(new_order['id'], str) or not isinstance(new_order['price'], (float, int)):
-                                        logging.error(f"Unexpected types in new_order for sell: {new_order}")
-                                        continue
                                     logging.info(f"Placed new sell order successfully: {new_order}")
                                     new_sell_orders.append({
                                         "id": new_order['id'],
-                                        "price": float(new_order['price']),  # Ensure proper type
+                                        "price": new_order['price'],
                                         "side": "sell",
                                     })
                                 else:
@@ -421,101 +421,94 @@ def adjust_grid_range():
                 logging.error(f"Error in new order placement logic: {e}")
                 send_push_notification(f"ALERT: Error in new order placement logic: {e}")
 
+
+            
+            
+            
+            
             # Final state logging
             logging.info(f"Final new_buy_orders: {new_buy_orders}")
-            logging.info(f"Final new_sell_orders: {new_sell_orders}")
-
-
-
-
-
-
-
-            #-------------------------------------------------------------------------------------------------------------------------
-
-
-
-
-            # Έλεγχος για ισορροπία παραγγελιών
-            while len(new_buy_orders) + len(buy_orders) < len(new_sell_orders) + len(sell_orders):
-                price = round(current_price - GRID_SIZE * (len(buy_orders) + len(new_buy_orders) + 1), 4)
-                if price not in [o['price'] for o in buy_orders + new_buy_orders]:  # Avoid duplicates
-                    try:
-                        order = exchange.create_limit_buy_order(SYMBOL, AMOUNT, price)
-                        new_buy_orders.append({
-                            "id": order['id'],
-                            "price": price,
-                            "side": "buy",
-                            "amount": AMOUNT,
-                            "status": "open",
-                        })
-                        logging.info(f"Placed new buy order at price: {price}")
-                        time.sleep(0.2)  # Avoid rate limits
-                    except Exception as e:
-                        logging.error(f"Failed to place new buy order at price {price}: {e}")
-                        break
-
-            while len(new_sell_orders) + len(sell_orders) < len(new_buy_orders) + len(buy_orders):
-                price = round(current_price + GRID_SIZE * (len(sell_orders) + len(new_sell_orders) + 1), 4)
-                if price not in [o['price'] for o in sell_orders + new_sell_orders]:  # Avoid duplicates
-                    try:
-                        order = exchange.create_limit_sell_order(SYMBOL, AMOUNT, price)
-                        new_sell_orders.append({
-                            "id": order['id'],
-                            "price": price,
-                            "side": "sell",
-                            "amount": AMOUNT,
-                            "status": "open",
-                        })
-                        logging.info(f"Placed new sell order at price: {price}")
-                        time.sleep(0.2)  # Avoid rate limits
-                    except Exception as e:
-                        logging.error(f"Failed to place new sell order at price {price}: {e}")
-                        break
-
-            # Υπολογισμός συνολικού αριθμού παραγγελιών
-            total_orders = len(buy_orders) + len(sell_orders) + len(new_buy_orders) + len(new_sell_orders)
-
-            # Έλεγχος και διόρθωση για υπερβάλλοντες παραγγελίες
-            if total_orders > MAX_ORDERS:
-                excess = total_orders - MAX_ORDERS
-                logging.warning(f"Excess orders detected: {excess}. Adjusting...")
-                
-                # Διαγραφή επιπλέον παραγγελιών από τις νέες παραγγελίες
-                while excess > 0:
-                    if new_buy_orders and len(new_buy_orders) > len(new_sell_orders):
-                        order_to_cancel = new_buy_orders.pop()
-                        try:
-                            exchange.cancel_order(order_to_cancel['id'], SYMBOL)
-                            logging.info(f"Canceled excess buy order at price: {order_to_cancel['price']}")
-                        except Exception as e:
-                            logging.error(f"Failed to cancel excess buy order: {e}")
-                    elif new_sell_orders and len(new_sell_orders) > len(new_buy_orders):
-                        order_to_cancel = new_sell_orders.pop()
-                        try:
-                            exchange.cancel_order(order_to_cancel['id'], SYMBOL)
-                            logging.info(f"Canceled excess sell order at price: {order_to_cancel['price']}")
-                        except Exception as e:
-                            logging.error(f"Failed to cancel excess sell order: {e}")
-                    excess -= 1
-
-                    
-                    
-#############################################################################################################################################################################
-                   
-                    
-
-            # Καταγραφή τελικών παραγγελιών
-            final_buy_orders = buy_orders + [order['price'] for order in new_buy_orders]
-            final_sell_orders = sell_orders + [order['price'] for order in new_sell_orders]
-
-            logging.info(f"Final buy orders: {final_buy_orders}")
-            logging.info(f"Final sell orders: {final_sell_orders}")
-
-            send_push_notification(f"ALERT: Grid range adjusted successfully!")
+            logging.info(f"Final new_sell_orders: {new_sell_orders}")                                   
+                                
+                                
 
         else:
             logging.info("No grid alteration was made. All orders are within the range.")
+
+           
+
+
+        # Έλεγχος για ισορροπία παραγγελιών
+        while len(new_buy_orders) + len(buy_orders) < len(new_sell_orders) + len(sell_orders):
+            logging.info("Adjusting buy orders to maintain balance...")
+            price = round(current_price - GRID_SIZE * (len(buy_orders) + len(new_buy_orders) + 1), 4)
+            
+            # Αποφυγή διπλών παραγγελιών
+            existing_prices = [order['price'] for order in buy_orders + new_buy_orders if isinstance(order, dict)]
+            if price not in existing_prices:
+                try:
+                    order = exchange.create_limit_buy_order(SYMBOL, AMOUNT, price)
+                    if isinstance(order, dict) and 'id' in order and 'price' in order:
+                        new_buy_orders.append({
+                            "id": str(order['id']),
+                            "price": float(order['price']),
+                            "side": "buy",
+                        })
+                        logging.info(f"Placed new buy order at price: {price}")
+                except Exception as e:
+                    logging.error(f"Failed to place new buy order at price {price}: {e}")
+                    break
+
+        # Έλεγχος για sell orders
+        while len(new_sell_orders) + len(sell_orders) < len(new_buy_orders) + len(buy_orders):
+            price = round(current_price + GRID_SIZE * (len(sell_orders) + len(new_sell_orders) + 1), 4)
+            existing_prices = [order['price'] for order in sell_orders + new_sell_orders if isinstance(order, dict)]
+            if price not in existing_prices:
+                try:
+                    order = exchange.create_limit_sell_order(SYMBOL, AMOUNT, price)
+                    if isinstance(order, dict) and 'id' in order and 'price' in order:
+                        new_sell_orders.append({
+                            "id": str(order['id']),
+                            "price": float(order['price']),
+                            "side": "sell",
+                        })
+                        logging.info(f"Placed new sell order at price: {price}")
+                except Exception as e:
+                    logging.error(f"Failed to place new sell order at price {price}: {e}")
+                    break
+
+        
+        
+        # Υπολογισμός συνολικού αριθμού παραγγελιών
+        total_orders = len(buy_orders) + len(sell_orders) + len(new_buy_orders) + len(new_sell_orders)
+
+        # Έλεγχος και διόρθωση για υπερβάλλοντες παραγγελίες
+        if total_orders > MAX_ORDERS:
+            excess = total_orders - MAX_ORDERS
+            logging.warning(f"Excess orders detected: {excess}. Adjusting...")
+            
+            # Διαγραφή επιπλέον παραγγελιών από τις νέες παραγγελίες
+            while excess > 0:
+                if new_buy_orders and len(new_buy_orders) > len(new_sell_orders):
+                    order_to_cancel = new_buy_orders.pop()
+                    try:
+                        exchange.cancel_order(order_to_cancel['id'], SYMBOL)
+                        logging.info(f"Canceled excess buy order at price: {order_to_cancel['price']}")
+                    except Exception as e:
+                        logging.error(f"Failed to cancel excess buy order: {e}")
+                elif new_sell_orders and len(new_sell_orders) > len(new_buy_orders):
+                    order_to_cancel = new_sell_orders.pop()
+                    try:
+                        exchange.cancel_order(order_to_cancel['id'], SYMBOL)
+                        logging.info(f"Canceled excess sell order at price: {order_to_cancel['price']}")
+                    except Exception as e:
+                        logging.error(f"Failed to cancel excess sell order: {e}")
+                excess -= 1
+
+
+            send_push_notification(f"ALERT: Grid range adjusted successfully!")
+
+
 
     except Exception as e:
         logging.error(f"An error occurred: {e}")
