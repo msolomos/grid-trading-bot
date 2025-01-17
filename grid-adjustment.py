@@ -18,6 +18,10 @@ OPEN_ORDERS_FILE = "/opt/python/grid-trading-bot/open_orders.json"
 JSON_PATH = "/opt/python/grid-trading-bot/config.json"
 PAUSE_FLAG_PATH = "/opt/python/grid-trading-bot/pause.flag"
 
+# Για το function cancel_orders_outside_range
+MAX_RETRIES = 5
+RETRY_DELAY_SECONDS = 2
+
 
 # Παράμετροι Αποστολής E-mail
 ENABLE_EMAIL_NOTIFICATIONS = True
@@ -166,25 +170,42 @@ def calculate_grid_levels(current_price, grid_size, grid_count):
 
 # Cancel orders outside range
 def cancel_orders_outside_range(exchange, orders_to_cancel):
-    """
-    Ακυρώνει τις παραγγελίες που έχουν ήδη φιλτραριστεί.
-    """
-    canceled_orders = []
-
+    canceled_order_ids = []
     for order in orders_to_cancel:
-        order_id = order["id"]
-        price = round(float(order["price"]), 4)
-        side = order["side"]
-
         try:
-            exchange.cancel_order(order_id, SYMBOL)
-            canceled_orders.append(order_id)
-            logging.info(f"Canceled order | ID: {order_id} | Price: {price:.4f} | Side: {side}")
-            time.sleep(0.2)  # Avoid rate limits
+            exchange.cancel_order(order['id'], SYMBOL)
+            logging.info(f"Canceled order | ID: {order['id']} | Price: {order['price']} | Side: {order['side']}")
+            canceled_order_ids.append(order['id'])
         except Exception as e:
-            logging.error(f"Failed to cancel order | ID: {order_id} | Error: {e}")
+            logging.error(f"Failed to cancel order ID {order['id']}: {e}")
 
-    return canceled_orders
+    # Μετά την ακύρωση, κάνε loop για να δεις αν πράγματι εξαφανίστηκαν
+    if canceled_order_ids:
+        for _ in range(MAX_RETRIES):
+            open_orders = exchange.fetch_open_orders(SYMBOL)
+            # Ελεγξε αν οι canceled_order_ids υπάρχουν ακόμα
+            still_visible = []
+            for order_id in canceled_order_ids:
+                if any(o for o in open_orders if o.get('id') == order_id):
+                    still_visible.append(order_id)
+
+            if not still_visible:
+                logging.info("All canceled orders have disappeared from open_orders.")
+                
+                #open_orders = exchange.fetch_open_orders(SYMBOL)
+                #logging.info(f"Refetched open orders after confirming cancellations. Found {len(open_orders)} orders.")
+                
+                
+                break
+
+            logging.info(f"Canceled orders {still_visible} still present. Retrying in {RETRY_DELAY_SECONDS}s...")
+            time.sleep(RETRY_DELAY_SECONDS)
+        else:
+            # Αν φτάσουμε εδώ, σημαίνει ότι μετά από MAX_RETRIES, κάποια canceled orders
+            # δεν έχουν εμφανιστεί ως ακυρωμένες στο fetch_open_orders().
+            logging.warning(f"Canceled orders still present after {MAX_RETRIES} retries: {still_visible}")
+
+    return canceled_order_ids
 
 
 
@@ -251,9 +272,9 @@ def place_new_orders(exchange, grid_levels, existing_prices, max_orders):
 def save_open_orders_to_file(file_path, open_orders, statistics=None, silent=False):
     try:
         orders_to_save = {}
-        for price, order in open_orders.items():
+        for _, order in open_orders.items():  # Αλλάξαμε το key loop από price σε _
             try:
-                orders_to_save[str(price)] = {
+                orders_to_save[str(order.get('price'))] = {  # Χρησιμοποιούμε το price ως κλειδί
                     'id': order.get('id'),
                     'symbol': order.get('symbol'),
                     'price': order.get('price'),
@@ -265,7 +286,7 @@ def save_open_orders_to_file(file_path, open_orders, statistics=None, silent=Fal
                     'timestamp': order.get('timestamp'),
                 }
             except AttributeError as e:
-                logging.error(f"Error serializing order at price {price}: {e}. Order: {order}")
+                logging.error(f"Error serializing order with ID {order.get('id')}: {e}. Order: {order}")
                 continue
 
         data_to_save = {
@@ -287,231 +308,453 @@ def save_open_orders_to_file(file_path, open_orders, statistics=None, silent=Fal
     except Exception as e:
         logging.error(f"Failed to save open orders and statistics to file: {e}")
 
-# Main function
+
+
+
+
+# -- Νέες βοηθητικές συναρτήσεις, προσαρμοσμένες ώστε να χρησιμοποιούν τα παραπάνω --
+
+def fetch_and_initialize_exchange():
+    """
+    1) Καλεί την initialize_exchange()
+    2) Παίρνει το current_price
+    3) Επιστρέφει (exchange, current_price)
+    """
+    # Χρησιμοποιούμε τη δική σου βασική συνάρτηση
+    exchange = initialize_exchange()
+    
+    # Παίρνουμε το ticker για να βρούμε την τρέχουσα τιμή
+    ticker = exchange.fetch_ticker(SYMBOL)
+    current_price = ticker['last']
+    
+    logging.info(f"Current price: {current_price} {CRYPTO_CURRENCY}")
+    return exchange, current_price
+
+
+def fetch_and_check_open_orders(exchange):
+    """
+    1) Καλεί τη δική σου fetch_open_orders(exchange)
+    2) Κάνει logging + checks
+    3) Επιστρέφει open_orders ή None αν δεν υπάρχουν
+    """
+    # Χρησιμοποιούμε τη δική σου βασική συνάρτηση
+    open_orders = fetch_open_orders(exchange)
+    logging.info(f"Fetched {len(open_orders)} open orders from {EXCHANGE_NAME.upper()}.")
+    logging.debug(f"Open orders fetched from {EXCHANGE_NAME.upper()}: {open_orders}")
+    
+    # Έλεγχος αν δεν υπάρχουν open orders
+    if not open_orders:
+        logging.warning(f"No open orders fetched from {EXCHANGE_NAME.upper()}. Exiting...")
+        return None
+    
+    return open_orders
+
+
+# -- Οι υπόλοιπες βοηθητικές συναρτήσεις σου (ίδιες όπως πριν) --
+
+def separate_buy_sell_orders(open_orders):
+    buy_orders = sorted(
+        [round(float(order['price']), 4) for order in open_orders if order['side'] == 'buy']
+    )
+    sell_orders = sorted(
+        [round(float(order['price']), 4) for order in open_orders if order['side'] == 'sell']
+    )
+    logging.info(f"Buy orders on exchange: {buy_orders}")
+    logging.info(f"Sell orders on exchange: {sell_orders}")
+    return buy_orders, sell_orders
+
+def find_farthest_orders(buy_orders, sell_orders):
+    farthest_buy_order = buy_orders[0] if buy_orders else None
+    farthest_sell_order = sell_orders[-1] if sell_orders else None
+    logging.info(f"Farthest buy order: {farthest_buy_order}")
+    logging.info(f"Farthest sell order: {farthest_sell_order}")
+    return farthest_buy_order, farthest_sell_order
+
+def find_orders_out_of_range(open_orders, current_price, buy_orders, sell_orders):
+    orders_to_cancel = []
+    new_buy_orders = []
+    new_sell_orders = []
+    
+    # Υπολογισμός των ορίων του grid
+    lower_bound = current_price - (GRID_SIZE * GRID_COUNT)
+    upper_bound = current_price + (GRID_SIZE * GRID_COUNT)
+
+    farthest_buy_order = buy_orders[0] if buy_orders else None
+    farthest_sell_order = sell_orders[-1] if sell_orders else None
+
+    # Έλεγχος για ακύρωση της πιο απομακρυσμένης buy παραγγελίας
+    if farthest_buy_order and farthest_buy_order < lower_bound:
+        try:            
+            order = next((order for order in open_orders if abs(float(order['price']) - farthest_buy_order) < 0.0001), None)
+            
+            orders_to_cancel.append(order)
+            logging.info(f"Buy order at price {farthest_buy_order} is out of range. "
+                         f"Lower bound: {lower_bound:.4f}. It will be canceled.")
+        except Exception as e:
+            logging.error(f"Error finding farthest buy order: {e}")
+
+    # Έλεγχος για ακύρωση της πιο απομακρυσμένης sell παραγγελίας
+    if farthest_sell_order and farthest_sell_order > upper_bound:
+        try:
+            order = next((order for order in open_orders if abs(float(order['price']) - farthest_sell_order) < 0.0001), None)
+
+            orders_to_cancel.append(order)
+            logging.info(f"Sell order at price {farthest_sell_order} is out of range. "
+                         f"Upper bound: {upper_bound:.4f}. It will be canceled.")
+        except Exception as e:
+            logging.error(f"Error finding farthest sell order: {e}")
+    
+    if orders_to_cancel:
+        logging.info(f"Orders to cancel: {len(orders_to_cancel)}")
+        logging.info(f"Order prices to cancel: {[order['price'] for order in orders_to_cancel]}")
+    else:
+        logging.info("No orders to cancel.")
+    
+    logging.debug(f"Orders to cancel (prices): {[order['price'] for order in orders_to_cancel if isinstance(order, dict)]}")
+
+    return orders_to_cancel, new_buy_orders, new_sell_orders
+
+
+
+
+
+def process_canceled_orders(exchange, canceled_orders, all_orders, current_price, new_buy_orders, new_sell_orders):
+    """
+    Επεξεργάζεται τις ακυρωμένες παραγγελίες, αντικαθιστά τις θέσεις τους και ανανεώνει το αρχείο παραγγελιών.
+    """
+    try:
+        # Φόρτωμα όλων των παραγγελιών από το γνωστό αρχείο
+        with open(OPEN_ORDERS_FILE, 'r') as f:
+            data = json.load(f)
+            all_orders_from_file = data.get("orders", {})
+
+        # Ενημερωμένο dictionary για παραγγελίες
+        updated_orders = all_orders_from_file.copy()
+
+        for order_id in canceled_orders:
+            logging.info(f"Processing canceled order ID: {order_id}")
+
+            # Αναζήτηση της παραγγελίας με βάση το Order ID
+            order_details = None
+            for price, order in all_orders_from_file.items():
+                if str(order.get('id')) == str(order_id):
+                    order_details = order
+                    # Αφαιρούμε την παραγγελία από το ενημερωμένο dictionary
+                    updated_orders.pop(price, None)
+                    break
+
+            if not order_details:
+                logging.warning(f"Order details not found in file for ID: {order_id}")
+                continue
+
+            logging.info(f"Found order details for ID {order_id}: {order_details}")
+
+            # Προσθήκη νέας παραγγελίας
+            if order_details['side'] == 'buy':
+                price = round(current_price - GRID_SIZE * (len(new_buy_orders) + 1), 4)
+                logging.info(f"Preparing to place new buy order at price: {price}")
+                try:
+                    new_order = exchange.create_limit_buy_order(SYMBOL, AMOUNT, price)
+                    if isinstance(new_order, dict) and 'id' in new_order and 'price' in new_order:
+                        logging.info(f"Placed new buy order successfully: {new_order}")
+                        new_buy_orders.append({
+                            "id": new_order['id'],
+                            "price": new_order['price'],
+                            "side": "buy",
+                        })
+                        updated_orders[str(new_order['price'])] = {
+                            "id": new_order['id'],
+                            "price": new_order['price'],
+                            "side": "buy",
+                            "status": "open",
+                            "amount": AMOUNT,
+                            "remaining": AMOUNT,
+                            "datetime": new_order.get('datetime'),
+                            "timestamp": new_order.get('timestamp'),
+                        }
+                except Exception as e:
+                    logging.error(f"Error placing new buy order at price {price}: {e}")
+
+            elif order_details['side'] == 'sell':
+                price = round(current_price + GRID_SIZE * (len(new_sell_orders) + 1), 4)
+                logging.info(f"Preparing to place new sell order at price: {price}")
+                try:
+                    new_order = exchange.create_limit_sell_order(SYMBOL, AMOUNT, price)
+                    if isinstance(new_order, dict) and 'id' in new_order and 'price' in new_order:
+                        logging.info(f"Placed new sell order successfully: {new_order}")
+                        new_sell_orders.append({
+                            "id": new_order['id'],
+                            "price": new_order['price'],
+                            "side": "sell",
+                        })
+                        updated_orders[str(new_order['price'])] = {
+                            "id": new_order['id'],
+                            "price": new_order['price'],
+                            "side": "sell",
+                            "status": "open",
+                            "amount": AMOUNT,
+                            "remaining": AMOUNT,
+                            "datetime": new_order.get('datetime'),
+                            "timestamp": new_order.get('timestamp'),
+                        }
+                except Exception as e:
+                    logging.error(f"Error placing new sell order at price {price}: {e}")
+
+        # Αποθήκευση των ενημερωμένων παραγγελιών στο αρχείο
+        with open(OPEN_ORDERS_FILE, 'w') as f:
+            json.dump({"orders": updated_orders}, f, indent=4)
+
+        #logging.info(f"Updated open orders file after processing canceled orders.")
+
+    except Exception as e:
+        logging.error(f"Error processing canceled orders: {e}")
+
+
+
+
+
+
+
+
+def maintain_order_balance(exchange, current_price, buy_orders, sell_orders, new_buy_orders, new_sell_orders):
+    """
+    Διατηρεί την ισορροπία μεταξύ buy και sell παραγγελιών, αποφεύγοντας να ξεπεράσει το MAX_ORDERS.
+    """
+    # Φόρτωσε τα open orders και έλεγξε τη μορφή τους
+    open_orders = exchange.fetch_open_orders(SYMBOL)
+    if not isinstance(open_orders, list):
+        logging.error(f"Expected open_orders to be a list but got {type(open_orders)}.")
+        return
+
+    logging.debug(f"Refetched open orders after confirming cancellations. Found {len(open_orders)} orders.")
+    
+    total_orders = len(open_orders)
+    if total_orders >= MAX_ORDERS:
+        logging.debug(f"We have {total_orders} orders, which is at or above MAX_ORDERS={MAX_ORDERS}.")
+        logging.info(f"No new orders will be placed to maintain balance. ({total_orders})")
+        return
+
+    # Επαλήθευση ισορροπίας για buy παραγγελίες
+    while (len(new_buy_orders) + len(buy_orders)) < (len(new_sell_orders) + len(sell_orders)):
+        total_orders = len(open_orders)
+        if total_orders >= MAX_ORDERS:
+            logging.info(f"Reached MAX_ORDERS={MAX_ORDERS} while trying to add buy orders. Stopping.")
+            break
+
+        logging.info("Adjusting buy orders to maintain balance...")
+        price = round(current_price - GRID_SIZE * (len(buy_orders) + len(new_buy_orders) + 1), 4)
+
+        # Επαλήθευση τιμών
+        existing_prices = []
+        for order in buy_orders + new_buy_orders:
+            if isinstance(order, dict) and 'price' in order:
+                try:
+                    existing_prices.append(round(float(order['price']), 4))
+                except (ValueError, TypeError) as e:
+                    logging.error(f"Invalid price in order: {order}. Error: {e}")
+        
+        if price not in existing_prices:
+            try:
+                order = exchange.create_limit_buy_order(SYMBOL, AMOUNT, price)
+                if isinstance(order, dict) and 'id' in order and 'price' in order:
+                    new_buy_orders.append({
+                        "id": str(order['id']),
+                        "price": float(order['price']),
+                        "side": "buy",
+                    })
+                    logging.info(f"Placed new buy order at price: {price:.4f}")
+            except Exception as e:
+                logging.error(f"Failed to place new buy order at price {price:.4f}: {e}")
+                break
+
+    # Επαλήθευση ισορροπίας για sell παραγγελίες
+    while (len(new_sell_orders) + len(sell_orders)) < (len(new_buy_orders) + len(buy_orders)):
+        total_orders = len(open_orders)
+        if total_orders >= MAX_ORDERS:
+            logging.info(f"Reached MAX_ORDERS={MAX_ORDERS} while trying to add sell orders. Stopping.")
+            break
+
+        price = round(current_price + GRID_SIZE * (len(sell_orders) + len(new_sell_orders) + 1), 4)
+
+        # Επαλήθευση τιμών
+        existing_prices = []
+        for order in sell_orders + new_sell_orders:
+            if isinstance(order, dict) and 'price' in order:
+                try:
+                    existing_prices.append(round(float(order['price']), 4))
+                except (ValueError, TypeError) as e:
+                    logging.error(f"Invalid price in order: {order}. Error: {e}")
+        
+        if price not in existing_prices:
+            try:
+                order = exchange.create_limit_sell_order(SYMBOL, AMOUNT, price)
+                if isinstance(order, dict) and 'id' in order and 'price' in order:
+                    new_sell_orders.append({
+                        "id": str(order['id']),
+                        "price": float(order['price']),
+                        "side": "sell",
+                    })
+                    logging.info(f"Placed new sell order at price: {price:.4f}")
+            except Exception as e:
+                logging.error(f"Failed to place new sell order at price {price:.4f}: {e}")
+                break
+
+
+
+
+def handle_excess_orders(exchange, buy_orders, sell_orders):
+    total_orders = len(buy_orders) + len(sell_orders)
+    
+    logging.debug(f"Total buy orders: {len(buy_orders)}")
+    logging.debug(f"Total sell orders: {len(sell_orders)}")
+    logging.debug(f"Total orders (buy + sell): {total_orders}")
+    
+    if total_orders > MAX_ORDERS:
+        excess = total_orders - MAX_ORDERS
+        logging.warning(f"Excess orders detected: {excess}. Adjusting...")
+        
+        while excess > 0:
+            if buy_orders and len(buy_orders) > len(sell_orders):
+                order_to_cancel = buy_orders.pop()
+                try:
+                    exchange.cancel_order(order_to_cancel['id'], SYMBOL)
+                    logging.info(f"Canceled excess buy order at price: {order_to_cancel['price']}")
+                except Exception as e:
+                    logging.error(f"Failed to cancel excess buy order: {e}")
+            elif sell_orders:
+                order_to_cancel = sell_orders.pop()
+                try:
+                    exchange.cancel_order(order_to_cancel['id'], SYMBOL)
+                    logging.info(f"Canceled excess sell order at price: {order_to_cancel['price']}")
+                except Exception as e:
+                    logging.error(f"Failed to cancel excess sell order: {e}")
+            excess -= 1
+        
+        send_push_notification(f"ALERT: Grid range adjusted successfully!")
+    else:
+        logging.info(f"No excess orders detected. ({total_orders})")
+
+        
+
+
+# η κεντρική σου συνάρτηση
 def adjust_grid_range():
     try:
         logging.info(f">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
         logging.info(f"Starting {SYMBOL} Grid Trading bot (grid range worker)...")
         
-        # Load keys and initialize exchange
-        exchange = initialize_exchange()
+        iteration_start = time.time()
 
-        # Fetch current price
-        ticker = exchange.fetch_ticker(SYMBOL)
-        current_price = ticker['last']
-        logging.info(f"Current price: {current_price} {CRYPTO_CURRENCY}")
+        # 1) Φόρτωμα κλειδιών & αρχικοποίηση (χρησιμοποιεί initialize_exchange())
+        exchange, current_price = fetch_and_initialize_exchange()
 
-        # Fetch open orders
-        open_orders = fetch_open_orders(exchange)
-        logging.info(f"Fetched {len(open_orders)} open orders from {EXCHANGE_NAME.upper()}.")
-        logging.debug(f"Open orders fetched from {EXCHANGE_NAME.upper()}: {open_orders}")
-        
-        # Έλεγχος αν δεν υπάρχουν open orders
+        # 2) Fetch open orders & check (χρησιμοποιεί fetch_open_orders())
+        open_orders = fetch_and_check_open_orders(exchange)
         if not open_orders:
-            logging.warning(f"No open orders fetched from {EXCHANGE_NAME.upper()}. Exiting...")
-            return        
-        
-        # Διαχωρισμός των παραγγελιών σε buy και sell από ανταλλακτήριο
-        buy_orders = sorted([round(float(order['price']), 4) for order in open_orders if order['side'] == 'buy'])
-        sell_orders = sorted([round(float(order['price']), 4) for order in open_orders if order['side'] == 'sell'])
-
-        logging.info(f"Buy orders on exchange: {buy_orders}")
-        logging.info(f"Sell orders on exchange: {sell_orders}")
-        
-        # Εντοπισμός παραγγελιών στο μακρινό άκρο
-        farthest_buy_order = buy_orders[0] if buy_orders else None
-        farthest_sell_order = sell_orders[-1] if sell_orders else None
-        
-        # Debug logging για τις τιμές
-        logging.info(f"Farthest buy order: {farthest_buy_order}")
-        logging.info(f"Farthest sell order: {farthest_sell_order}")        
-
-        # Ελέγχουμε αν οι πιο μακρινές παραγγελίες είναι εκτός του grid range
-        orders_to_cancel = []
-        new_buy_orders = []
-        new_sell_orders = []        
-        
-        # Εντοπισμός των παραγγελιών που είναι εκτός του εύρους
-        if farthest_buy_order and farthest_buy_order < current_price - (GRID_SIZE * GRID_COUNT):
-            try:
-                order = next(order for order in open_orders if float(order['price']) == farthest_buy_order)
-                orders_to_cancel.append(order)
-            except Exception as e:
-                logging.error(f"Error finding farthest buy order: {e}")
-        if farthest_sell_order and farthest_sell_order > current_price + (GRID_SIZE * GRID_COUNT):
-            try:
-                order = next(order for order in open_orders if float(order['price']) == farthest_sell_order)
-                orders_to_cancel.append(order)
-            except Exception as e:
-                logging.error(f"Error finding farthest sell order: {e}")
-
-        logging.info(f"Orders to cancel: {len(orders_to_cancel)}")
-        logging.info(f"Orders to cancel (prices): {[order['price'] for order in orders_to_cancel if isinstance(order, dict)]}")
-
+            return  # Σταματάμε, αφού δεν υπάρχουν open_orders
+            
+            
+          
 
         
+        logging.debug(f"2) Type of open_orders: {type(open_orders)}")
+        logging.debug(f"Contents of open_orders: {open_orders}")
 
+        
+        # 3) Ξεχωρισμός buy / sell
+        buy_orders, sell_orders = separate_buy_sell_orders(open_orders)
 
+        # 4) Εντοπισμός παραγγελιών που είναι εκτός range
+        orders_to_cancel, new_buy_orders, new_sell_orders = find_orders_out_of_range(
+            open_orders, current_price, buy_orders, sell_orders
+        )
+
+        logging.debug(f"4) Type of open_orders: {type(open_orders)}")
+        
+        # 5) Αν υπάρχουν παραγγελίες προς ακύρωση, ακύρωσέ τις
         if orders_to_cancel:
             logging.info(f"Starting cancellation process for {len(orders_to_cancel)} orders.")
             canceled_orders = cancel_orders_outside_range(exchange, orders_to_cancel)
-            logging.info(f"Canceled {len(canceled_orders)} orders.")
+            logging.debug(f"Canceled {len(canceled_orders)} orders.")
             logging.info(f"Canceled orders details: {canceled_orders}")
+            
+            # Ενημέρωση του αρχείου μετά την ακύρωση
+            logging.debug(f"5) Type of open_orders: {type(open_orders)}")
+            logging.debug(f"Contents of open_orders: {open_orders}")
+
+            if isinstance(open_orders, list):
+                # Μετατροπή λίστας σε dictionary χρησιμοποιώντας την τιμή ως κλειδί
+                open_orders = {order['price']: order for order in open_orders}
+            
+            #save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders)
+            #logging.info(f"Updated open orders file after cancellation.")
 
             
-
+            # Επεξεργασία canceled orders & δημιουργία νέων (buy/sell)
             try:
-                # Process canceled orders
-                for order_id in canceled_orders:
-                    logging.info(f"Processing canceled order ID: {order_id}")
-                    try:
-                        # Find order details
-                        order_details = next((o for o in open_orders if isinstance(o, dict) and o.get('id') == order_id), None)
-                        if not order_details:
-                            logging.warning(f"Order details not found or invalid format for ID: {order_id}")
-                            continue
+                process_canceled_orders(
+                    exchange, canceled_orders, open_orders, current_price,
+                    new_buy_orders, new_sell_orders
+                )
 
-                        logging.info(f"Found order details for ID {order_id}: {order_details}")
 
-                        # Create new buy order
-                        if order_details['side'] == 'buy':
-                            price = round(current_price - GRID_SIZE * (len(new_buy_orders) + 1), 4)
-                            logging.info(f"Preparing to place new buy order at price: {price}")
-                            try:
-                                new_order = exchange.create_limit_buy_order(SYMBOL, AMOUNT, price)
-                                logging.info(f"Raw response from create_limit_buy_order: {new_order}")
-                                if isinstance(new_order, dict) and 'id' in new_order and 'price' in new_order:
-                                    logging.info(f"Placed new buy order successfully: {new_order}")
-                                    new_buy_orders.append({
-                                        "id": new_order['id'],
-                                        "price": new_order['price'],
-                                        "side": "buy",
-                                    })
-                                else:
-                                    logging.error(f"Unexpected response from create_limit_buy_order: {new_order}")
-                                    send_push_notification(f"ALERT: Unexpected response from create_limit_buy_order: {new_order}")
-                            except Exception as e:
-                                logging.error(f"Error placing new buy order at price {price}: {e}")
-                                send_push_notification(f"ALERT: Error placing new buy order: {e}")
 
-                        # Create new sell order
-                        elif order_details['side'] == 'sell':
-                            price = round(current_price + GRID_SIZE * (len(new_sell_orders) + 1), 4)
-                            logging.info(f"Preparing to place new sell order at price: {price}")
-                            try:
-                                new_order = exchange.create_limit_sell_order(SYMBOL, AMOUNT, price)
-                                logging.info(f"Raw response from create_limit_sell_order: {new_order}")
-                                if isinstance(new_order, dict) and 'id' in new_order and 'price' in new_order:
-                                    logging.info(f"Placed new sell order successfully: {new_order}")
-                                    new_sell_orders.append({
-                                        "id": new_order['id'],
-                                        "price": new_order['price'],
-                                        "side": "sell",
-                                    })
-                                else:
-                                    logging.error(f"Unexpected response from create_limit_sell_order: {new_order}")
-                                    send_push_notification(f"ALERT: Unexpected response from create_limit_sell_order: {new_order}")
-                            except Exception as e:
-                                logging.error(f"Error placing new sell order at price {price}: {e}")
-                                send_push_notification(f"ALERT: Error placing new sell order: {e}")
-                    except Exception as e:
-                        logging.error(f"Error processing canceled order ID {order_id}: {e}")
-                        send_push_notification(f"ALERT: Error processing canceled order ID {order_id}: {e}")
+
+                
+                # Ενημέρωση του αρχείου μετά την επεξεργασία των ακυρωμένων παραγγελιών
+                logging.debug(f"5) Type of open_orders: {type(open_orders)}")
+                logging.debug(f"Contents of open_orders: {open_orders}")  
+                
+
+                if isinstance(open_orders, list):
+                    # Μετατροπή λίστας σε dictionary χρησιμοποιώντας την τιμή ως κλειδί
+                    open_orders = {order['price']: order for order in open_orders}                
+
+
+                
+                #save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders)
+                #logging.info(f"Updated open orders file after processing canceled orders.")                
+                
             except Exception as e:
                 logging.error(f"Error in new order placement logic: {e}")
                 send_push_notification(f"ALERT: Error in new order placement logic: {e}")
 
-
-            
-            
-            
-            
-            # Final state logging
-            logging.info(f"Final new_buy_orders: {new_buy_orders}")
-            logging.info(f"Final new_sell_orders: {new_sell_orders}")                                   
-                                
-                                
-
+            # Τελικό logging
+            logging.debug(f"Final new_buy_orders: {new_buy_orders}")
+            logging.debug(f"Final new_sell_orders: {new_sell_orders}")
         else:
             logging.info("No grid alteration was made. All orders are within the range.")
 
-           
-
-
-        # Έλεγχος για ισορροπία παραγγελιών
-        while len(new_buy_orders) + len(buy_orders) < len(new_sell_orders) + len(sell_orders):
-            logging.info("Adjusting buy orders to maintain balance...")
-            price = round(current_price - GRID_SIZE * (len(buy_orders) + len(new_buy_orders) + 1), 4)
-            
-            # Αποφυγή διπλών παραγγελιών
-            existing_prices = [order['price'] for order in buy_orders + new_buy_orders if isinstance(order, dict)]
-            if price not in existing_prices:
-                try:
-                    order = exchange.create_limit_buy_order(SYMBOL, AMOUNT, price)
-                    if isinstance(order, dict) and 'id' in order and 'price' in order:
-                        new_buy_orders.append({
-                            "id": str(order['id']),
-                            "price": float(order['price']),
-                            "side": "buy",
-                        })
-                        logging.info(f"Placed new buy order at price: {price}")
-                except Exception as e:
-                    logging.error(f"Failed to place new buy order at price {price}: {e}")
-                    break
-
-        # Έλεγχος για sell orders
-        while len(new_sell_orders) + len(sell_orders) < len(new_buy_orders) + len(buy_orders):
-            price = round(current_price + GRID_SIZE * (len(sell_orders) + len(new_sell_orders) + 1), 4)
-            existing_prices = [order['price'] for order in sell_orders + new_sell_orders if isinstance(order, dict)]
-            if price not in existing_prices:
-                try:
-                    order = exchange.create_limit_sell_order(SYMBOL, AMOUNT, price)
-                    if isinstance(order, dict) and 'id' in order and 'price' in order:
-                        new_sell_orders.append({
-                            "id": str(order['id']),
-                            "price": float(order['price']),
-                            "side": "sell",
-                        })
-                        logging.info(f"Placed new sell order at price: {price}")
-                except Exception as e:
-                    logging.error(f"Failed to place new sell order at price {price}: {e}")
-                    break
-
         
         
-        # Υπολογισμός συνολικού αριθμού παραγγελιών
-        total_orders = len(buy_orders) + len(sell_orders) + len(new_buy_orders) + len(new_sell_orders)
+        
+        
+        # 6) Διατήρηση ισορροπίας μεταξύ buy & sell
+        maintain_order_balance(exchange, current_price, buy_orders, sell_orders, new_buy_orders, new_sell_orders)
 
-        # Έλεγχος και διόρθωση για υπερβάλλοντες παραγγελίες
-        if total_orders > MAX_ORDERS:
-            excess = total_orders - MAX_ORDERS
-            logging.warning(f"Excess orders detected: {excess}. Adjusting...")
-            
-            # Διαγραφή επιπλέον παραγγελιών από τις νέες παραγγελίες
-            while excess > 0:
-                if new_buy_orders and len(new_buy_orders) > len(new_sell_orders):
-                    order_to_cancel = new_buy_orders.pop()
-                    try:
-                        exchange.cancel_order(order_to_cancel['id'], SYMBOL)
-                        logging.info(f"Canceled excess buy order at price: {order_to_cancel['price']}")
-                    except Exception as e:
-                        logging.error(f"Failed to cancel excess buy order: {e}")
-                elif new_sell_orders and len(new_sell_orders) > len(new_buy_orders):
-                    order_to_cancel = new_sell_orders.pop()
-                    try:
-                        exchange.cancel_order(order_to_cancel['id'], SYMBOL)
-                        logging.info(f"Canceled excess sell order at price: {order_to_cancel['price']}")
-                    except Exception as e:
-                        logging.error(f"Failed to cancel excess sell order: {e}")
-                excess -= 1
+        # 7) Έλεγχος & διόρθωση για υπερβάλλοντες παραγγελίες
+        handle_excess_orders(exchange, buy_orders, sell_orders)
+        
+        
+        # 8) Στο τέλος του adjust_grid_range
+        logging.debug(f"8) Type of open_orders: {type(open_orders)}")
+        logging.debug(f"Contents of open_orders: {open_orders}")  
 
+        if isinstance(open_orders, list):
+            # Μετατροπή λίστας σε dictionary χρησιμοποιώντας την τιμή ως κλειδί
+            open_orders = {order['price']: order for order in open_orders}
 
-            send_push_notification(f"ALERT: Grid range adjusted successfully!")
-
-
+        
+        save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders)
+        
+        
+        # Μετά την ολοκλήρωση του iteration
+        iteration_end = time.time()
+        logging.info(f"Bot execution completed in {iteration_end - iteration_start:.2f} seconds.")        
 
     except Exception as e:
         logging.error(f"An error occurred: {e}")
+
 
 
 
