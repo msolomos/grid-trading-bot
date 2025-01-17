@@ -15,7 +15,7 @@ logging.basicConfig(
     level=logging.INFO,  # Ρύθμιση για εμφάνιση μόνο INFO και πάνω
     format="%(asctime)s %(levelname)s %(message)s",
     handlers=[
-        logging.FileHandler("grid_trading_bot.log"),  # Αρχείο log
+        logging.FileHandler("/opt/python/grid-trading-bot/grid_trading_bot.log"),  # Αρχείο log
         logging.StreamHandler()  # Κονσόλα
     ]
 )
@@ -30,7 +30,7 @@ mock_order_counter = 0
 # Configuration parameters
 EXCHANGE_NAME = 'binance'
 SYMBOL = 'XRP/USDT'
-OPEN_ORDERS_FILE = 'open_orders.json'
+OPEN_ORDERS_FILE = '/opt/python/grid-trading-bot/open_orders.json'
 CRYPTO_SYMBOL = 'XRP'
 CRYPTO_CURRENCY = 'USDT'
 
@@ -42,11 +42,11 @@ GRID_SIZE = 0.043
 AMOUNT = 50
 # Number of grids above and below current price
 GRID_COUNT = 10
-# How often to update (seconds)
-UPDATE_INTERVAL = 300
 
 # Στατική μεταβλητή για τη διαδρομή του JSON αρχείου
 JSON_PATH = "/opt/python/grid-trading-bot/config.json"
+PAUSE_FLAG_PATH = "/opt/python/grid-trading-bot/pause.flag"
+
 
 # Παράμετροι Αποστολής E-mail
 ENABLE_EMAIL_NOTIFICATIONS = True
@@ -104,6 +104,10 @@ def load_keys():
 API_KEY, API_SECRET, SENDGRID_API_KEY, PUSHOVER_TOKEN, PUSHOVER_USER, EMAIL_SENDER, EMAIL_RECIPIENT = load_keys()
              
 
+
+def is_paused():
+    """Ελέγχει αν υπάρχει το pause flag."""
+    return os.path.exists(PAUSE_FLAG_PATH)
 
 
 
@@ -260,7 +264,7 @@ def save_open_orders_to_file(file_path, open_orders, statistics=None, silent=Fal
         os.replace(temp_file_path, file_path)  # Αντικατάσταση του παλιού αρχείου
 
         if not silent:
-            logging.info(f"Saved open orders and statistics to {file_path}")
+            logging.info(f"Saved open orders and statistics to {file_path}.")
     except Exception as e:
         logging.error(f"Failed to save open orders and statistics to file: {e}")
 
@@ -312,7 +316,7 @@ def load_or_fetch_open_orders(exchange, symbol, file_path):
 
         # Αποθήκευση των παραγγελιών και των στατιστικών σε τοπικό αρχείο
         save_open_orders_to_file(file_path, open_orders, statistics)
-        logging.info(f"Fetched and saved open orders and statistics to {file_path}")
+        logging.info(f"Fetched and saved open orders and statistics to {file_path}.")
         return open_orders, statistics
     except Exception as e:
         logging.error(f"Failed to load or fetch open orders and statistics: {e}")
@@ -405,12 +409,15 @@ def place_order(exchange, side, price, AMOUNT):
         }
     except ccxt.NetworkError as e:
         logging.error(f"Network error while placing order at {rounded_price:.4f} ({side}): {e}")
+        send_push_notification(f"Error while placing order at {rounded_price:.4f} ({side}): {e}")
         return None
     except ccxt.BaseError as e:
         logging.error(f"Exchange error while placing order at {rounded_price:.4f} ({side}): {e}")
+        send_push_notification(f"Exchange error while placing order at {rounded_price:.4f} ({side}): {e}")
         return None
     except Exception as e:
         logging.error(f"Unexpected error while placing order at {rounded_price:.4f} ({side}): {e}")
+        send_push_notification(f"Error while placing order at {rounded_price:.4f} ({side}): {e}")
         return None
 
 
@@ -489,6 +496,8 @@ def check_orders_status(exchange, open_orders, current_price):
     """
     filled_orders = []
     orders_to_remove = []
+    cancelled_orders = []
+    
 
     for price, order_info in list(open_orders.items()):
         rounded_price = round(price, 4)  # Στρογγυλοποίηση για συνέπεια
@@ -523,7 +532,11 @@ def check_orders_status(exchange, open_orders, current_price):
                     
                 elif status == "open":
                     logging.debug(f"Order {order_id} at {rounded_price:.4f} is still active.")
-                elif status in ["canceled", "rejected", "expired"]:
+                elif status in ["canceled"]:
+                    logging.warning(f"Order {order_id} at {rounded_price:.4f} was canceled by the user. Removing from open_orders.")
+                    cancelled_orders.append(rounded_price)
+                    orders_to_remove.append(rounded_price)                    
+                elif status in ["rejected", "expired"]:
                     logging.warning(f"Order {order_id} at {rounded_price:.4f} is {status}. Removing from open_orders.")
                     orders_to_remove.append(rounded_price)
                 else:
@@ -540,7 +553,11 @@ def check_orders_status(exchange, open_orders, current_price):
 
     # Καταγραφή κατάστασης
     logging.info(f"Current open orders after processing: {len(open_orders)} orders remain unchanged.")
-    logging.info(f"Filled orders in this iteration: {filled_orders}. Removed orders this iteration: {orders_to_remove}.")
+    logging.info(
+        f"Filled orders in this iteration: {filled_orders}. "
+        f"Removed orders in this iteration: {orders_to_remove}. "
+        f"Cancelled orders by user: {cancelled_orders}."
+    )    
     
 
     return filled_orders
@@ -584,10 +601,22 @@ def reconcile_open_orders(exchange, symbol, local_orders):
         for price, local_order in list(local_orders.items()):
             order_id = local_order.get("id")
             
-            # Αν η παραγγελία δεν υπάρχει στο Exchange, σημείωσέ την αλλά μην την αφαιρέσεις άμεσα
+            # Αν η παραγγελία δεν υπάρχει στο Exchange, ελέγξτε την κατάσταση
             if order_id not in exchange_order_ids:
-                logging.warning(f"Local order ID {order_id} at price {price} {CRYPTO_CURRENCY} not found on Exchange. Retaining temporarily.")
-                local_orders[price]['status'] = 'unknown'
+                # Προσπαθήστε να ανακτήσετε την κατάσταση της παραγγελίας από το Exchange
+                try:
+                    order_status = exchange.fetch_order_status(order_id, symbol)
+                    if order_status == "canceled":
+                        logging.info(f"Local order ID {order_id} at price {price} {CRYPTO_CURRENCY} was canceled on Exchange. Removing from local orders.")
+                    elif order_status == "filled":
+                        logging.info(f"Local order ID {order_id} at price {price} {CRYPTO_CURRENCY} was filled on Exchange. Removing from local orders.")
+                    else:
+                        logging.warning(f"Local order ID {order_id} at price {price} {CRYPTO_CURRENCY} not found on Exchange for an unknown reason. Removing from local orders.")
+                except Exception as e:
+                    logging.error(f"Failed to fetch status for order ID {order_id} at price {price}: {e}. Assuming it no longer exists and removing it.")
+
+                # Διαγράψτε την παραγγελία από το τοπικό αρχείο
+                del local_orders[price]
                 continue
 
             # Ενημέρωση παραγγελίας που υπάρχει και τοπικά και στο Exchange
@@ -621,28 +650,24 @@ def reconcile_open_orders(exchange, symbol, local_orders):
 
 # 7. ---------------------- Main Bot Logic ----------------------
 def run_grid_trading_bot(AMOUNT):
+       
     logging.info(f">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
     logging.info(f"Starting {SYMBOL} Grid Trading bot...")
-    
-    # --- NEW CODE ---
-    # Αρχικοποίηση μεταβλητών για καταμέτρηση και κέρδος
-    total_buys = 0
-    total_sells = 0
-    net_profit = 0.0
-    # --- END NEW CODE ---    
+    iteration_start = time.time()
 
+    # Αρχικοποίηση exchange
     exchange = initialize_exchange()
-
+    
     # Φόρτωση παραγγελιών και στατιστικών από το αρχείο
     open_orders, statistics = load_or_fetch_open_orders(exchange, SYMBOL, OPEN_ORDERS_FILE)
-    
+ 
     # Διασφάλιση consistency στα open_orders
     open_orders = {float(k): v for k, v in open_orders.items()}  # Τιμές σε float
     
     
     # Logging αρχικών τιμών
     logging.info(f"Loaded statistics: {statistics}")
-    logging.info(f"Loaded open orders: {open_orders}")
+    logging.debug(f"Loaded open orders: {open_orders}")
     
 
     # Συγχρονισμός με τα πραγματικά open orders από την Binance
@@ -655,23 +680,23 @@ def run_grid_trading_bot(AMOUNT):
 
     # Βρες την τρέχουσα τιμή
     current_price = get_current_price(exchange)
-    logging.info(f"Initial price: {current_price}")
+    logging.info(f"Current price: {current_price} {CRYPTO_CURRENCY}.")
 
-
-    # Δημιουργία grid (παράδειγμα: 10 * 10$ πάνω/κάτω)
-    buy_prices = [round(current_price - GRID_SIZE * i, 4) for i in range(1, GRID_COUNT + 1)]
-    sell_prices = [round(current_price + GRID_SIZE * i, 4) for i in range(1, GRID_COUNT + 1)]
-    
-    logging.info(f"Generated buy prices: {buy_prices}")
-    logging.info(f"Generated sell prices: {sell_prices}")
-
-
-
-    
+  
     
     # Αρχική τοποθέτηση εντολών (buy / sell) μόνο αν δεν υπάρχουν ήδη εντολές
     if not open_orders:
+        
         logging.info("No existing open orders. Placing initial grid orders.")
+        
+        
+        # Δημιουργία grid (παράδειγμα: 10 * 10$ πάνω/κάτω)
+        buy_prices = [round(current_price - GRID_SIZE * i, 4) for i in range(1, GRID_COUNT + 1)]
+        sell_prices = [round(current_price + GRID_SIZE * i, 4) for i in range(1, GRID_COUNT + 1)]
+        
+        logging.info(f"Generated buy prices: {buy_prices}")
+        logging.info(f"Generated sell prices: {sell_prices}")        
+        
         all_orders_successful = True  # Flag για επιτυχία τοποθέτησης όλων των παραγγελιών
 
         for price in buy_prices:
@@ -679,6 +704,7 @@ def run_grid_trading_bot(AMOUNT):
                 order = place_order(exchange, "buy", price, AMOUNT)
                 if order:
                     open_orders[price] = order
+                    statistics["total_buys"] += 1  # Ενημέρωση στατιστικών
                 else:
                     logging.error(f"Stopping initial grid setup due to issue at buy price {price:.4f}.")
                     all_orders_successful = False
@@ -689,6 +715,7 @@ def run_grid_trading_bot(AMOUNT):
                 order = place_order(exchange, "sell", price, AMOUNT)
                 if order:
                     open_orders[price] = order
+                    statistics["total_sells"] += 1  # Ενημέρωση στατιστικών
                 else:
                     logging.error(f"Stopping initial grid setup due to issue at sell price {price:.4f}.")
                     all_orders_successful = False
@@ -711,213 +738,197 @@ def run_grid_trading_bot(AMOUNT):
             return
 
 
-    # Αρχικοποίηση της local_open_orders πριν το loop
-    local_open_orders = {}    
+       
     
+    try:
+        # Execute trade logic 
+        logging.info(f"Executing trade logic for {CRYPTO_SYMBOL}")
+       
 
-    # Ξεκινάμε το loop
-    while True:
-        iteration_start = time.time()
-        failed_attempts = 0  # Counter για αποτυχημένες προσπάθειες
-           
+        # --- NEW CODE ---
+        # Εμφάνιση συνολικών αγορών, πωλήσεων και κέρδους στην αρχή του iteration
+        #logging.info(f"Total Buys: {statistics['total_buys']}, Total Sells: {statistics['total_sells']}, Net Profit: {statistics['net_profit']:.2f}")
+        # --- END NEW CODE ---
+
+
+
+        # Λήψη τρέχουσας τιμής
+        #current_price = get_current_price(exchange)
+        #logging.info(f"Current price: {current_price} {CRYPTO_CURRENCY}.")
+
+
         
-        try:
-            logging.info(f"==========================================================")
-            logging.info(f"Starting a new loop iteration for {CRYPTO_SYMBOL}")
-            logging.info(f"==========================================================")
-
-
-            # --- NEW CODE ---
-            # Εμφάνιση συνολικών αγορών, πωλήσεων και κέρδους στην αρχή του iteration
-            logging.info(f"Total Buys: {statistics['total_buys']}, Total Sells: {statistics['total_sells']}, Net Profit: {statistics['net_profit']:.2f}")
-            # --- END NEW CODE ---
+        # Συγχρονισμός ανοιχτών παραγγελιών με την ανταλλαγή
+        #open_orders = reconcile_open_orders(exchange, SYMBOL, open_orders)
+        #open_orders_count = len(open_orders)
+        #logging.debug(f"Currently, there are {open_orders_count} open orders.")
+        logging.debug(f"Open orders after reconciliation: {open_orders}")
 
 
 
-            # Λήψη τρέχουσας τιμής
-            try:
-                current_price = get_current_price(exchange)
-                logging.info(f"Current price: {current_price} {CRYPTO_CURRENCY}.")
-            except Exception as e:
-                logging.error(f"Failed to fetch current price: {e}")
-                continue  # Προχωράει στην επόμενη επανάληψη
-
-            # Συγχρονισμός ανοιχτών παραγγελιών με την ανταλλαγή
-            try:
-                open_orders = reconcile_open_orders(exchange, SYMBOL, open_orders)
-                open_orders_count = len(open_orders)
-                logging.debug(f"Currently, there are {open_orders_count} open orders.")
-                logging.debug(f"Open orders after reconciliation: {open_orders}")
-            except Exception as e:
-                logging.error(f"Error reconciling open orders: {e}")
-                continue
-
-
-#######################################################################################################################
+        # Έλεγχος κατάστασης παραγγελιών
+        filled_orders = check_orders_status(exchange, open_orders, current_price)
+        logging.debug(f"Orders identified as filled: {filled_orders}")
+        logging.debug(f"Check order status has been completed")
 
 
 
-            # Έλεγχος κατάστασης παραγγελιών
-            try:
-                filled_orders = check_orders_status(exchange, open_orders, current_price)
-                logging.debug(f"Orders identified as filled: {filled_orders}")
-                logging.debug(f"Check order status has been completed")
-            except Exception as e:
-                logging.error(f"Error checking order status: {e}")
-                continue
+        # Υπολογισμός δυναμικού grid
+        buy_prices = [round(current_price - GRID_SIZE * i, 4) for i in range(1, GRID_COUNT + 1)]
+        sell_prices = [round(current_price + GRID_SIZE * i, 4) for i in range(1, GRID_COUNT + 1)]
+        logging.info(f"Adjusted Buy prices: {buy_prices}")
+        logging.info(f"Adjusted Sell prices: {sell_prices}")
 
-            # Υπολογισμός δυναμικού grid
-            buy_prices = [current_price - GRID_SIZE * i for i in range(1, GRID_COUNT + 1)]
-            sell_prices = [current_price + GRID_SIZE * i for i in range(1, GRID_COUNT + 1)]
-            logging.debug(f"Buy prices: {buy_prices}")
-            logging.debug(f"Sell prices: {sell_prices}")
 
-            # Επεξεργασία παραγγελιών που εκτελέστηκαν
-            for filled_price in filled_orders:
-                rounded_filled_price = round(filled_price, 4)
-                if rounded_filled_price in open_orders:
-                    order_info = open_orders.pop(rounded_filled_price)
-                    side = order_info["side"]
-                    amount = order_info["amount"]
-                    new_price = round(rounded_filled_price + (GRID_SIZE if side == "buy" else -GRID_SIZE), 4)
-                    order_price = order_info["price"]  # Τιμή της παραγγελίας (αγοράς ή πώλησης)
-                    
-                    
-                    # --- NEW CODE ---
-                    # Υπολογισμός κέρδους ή ζημίας
-                    if side == "sell":
-                        buy_price = order_price  # Χρησιμοποιούμε την τιμή αγοράς από την παραγγελία
-                        profit = (rounded_filled_price - buy_price) * amount
-                        statistics["total_sells"] += 1
-                        logging.info(f"Profit from Sell Order: {profit:.2f}, Updated Net Profit: {statistics['net_profit']:.2f}")
-                    elif side == "buy":
-                        # Αύξηση total_buys
-                        statistics["total_buys"] += 1
-                    # --- END NEW CODE ---
 
-                    
 
-                    # Ελέγχουμε αν η νέα παραγγελία είναι εντός του grid
-                    if (side == "buy" and new_price >= min(buy_prices)) or (side == "sell" and new_price <= max(sell_prices)):
-                        if new_price not in open_orders:
-                            try:
-                                # Ελέγχουμε αν υπάρχει ήδη παραγγελία στο exchange για αυτή την τιμή
-                                exchange_orders = fetch_open_orders_from_exchange(exchange, SYMBOL)
-                                exchange_prices = {round(float(order['price']), 4) for order in exchange_orders}
+        # Επεξεργασία παραγγελιών που εκτελέστηκαν
+        for filled_price in filled_orders:
+            rounded_filled_price = round(filled_price, 4)
+            if rounded_filled_price in open_orders:
+                order_info = open_orders.pop(rounded_filled_price)
+                side = order_info["side"]
+                amount = order_info["amount"]
+                new_price = round(rounded_filled_price + (GRID_SIZE if side == "buy" else -GRID_SIZE), 4)
+                order_price = order_info["price"]  # Τιμή της παραγγελίας (αγοράς ή πώλησης)
+                
+                
+                # --- NEW CODE ---
+                # Υπολογισμός κέρδους ή ζημίας
+                if side == "sell":
+                    buy_price = order_price  # Χρησιμοποιούμε την τιμή αγοράς από την παραγγελία
+                    profit = (rounded_filled_price - buy_price) * amount
+                    statistics["total_sells"] += 1
+                    logging.info(f"Profit from Sell Order: {profit:.2f}, Updated Net Profit: {statistics['net_profit']:.2f}")
+                elif side == "buy":
+                    # Αύξηση total_buys
+                    statistics["total_buys"] += 1
+                # --- END NEW CODE ---
 
-                                if new_price in exchange_prices:
-                                    logging.info(f"{side.capitalize()} order at {new_price:.4f} already active on exchange. Skipping.")
-                                    continue  # Προχωράμε στην επόμενη παραγγελία
-                            except Exception as e:
-                                logging.error(f"Error verifying new order at {new_price:.4f} on exchange: {e}")
-                                continue
+                
 
-                            try:
-                                # Τοποθέτηση νέας παραγγελίας
-                                order = place_order(exchange, side, new_price, AMOUNT)
-                                if order:
-                                    open_orders[new_price] = order
-                                    logging.info(f"Placed new {side.capitalize()} order at {new_price:.4f}")
-                                else:
-                                    logging.warning(f"Failed to place new {side.capitalize()} order at {new_price:.4f}. Skipping.")
-                            except RuntimeError as e:
-                                logging.error(f"Critical error while placing {side.capitalize()} order at {new_price:.4f}: {e}")
-                                continue
-                        else:
-                            logging.debug(f"{side.capitalize()} order at {new_price:.4f} already exists locally.")
+                # Ελέγχουμε αν η νέα παραγγελία είναι εντός του grid
+                if (side == "buy" and new_price >= min(buy_prices)) or (side == "sell" and new_price <= max(sell_prices)):
+                    if new_price not in open_orders:
+                        try:
+                            # Ελέγχουμε αν υπάρχει ήδη παραγγελία στο exchange για αυτή την τιμή
+                            exchange_orders = fetch_open_orders_from_exchange(exchange, SYMBOL)
+                            exchange_prices = {round(float(order['price']), 4) for order in exchange_orders}
+
+                            if new_price in exchange_prices:
+                                logging.info(f"{side.capitalize()} order at {new_price:.4f} already active on exchange. Skipping.")
+                                continue  # Προχωράμε στην επόμενη παραγγελία
+                        except Exception as e:
+                            logging.error(f"Error verifying new order at {new_price:.4f} on exchange: {e}")
+                            continue
+
+                        try:
+                            # Τοποθέτηση νέας παραγγελίας
+                            order = place_order(exchange, side, new_price, AMOUNT)
+                            if order:
+                                open_orders[new_price] = order
+                                logging.info(f"Placed new {side.capitalize()} order at {new_price:.4f}")
+                            else:
+                                logging.warning(f"Failed to place new {side.capitalize()} order at {new_price:.4f}. Skipping.")
+                        except RuntimeError as e:
+                            logging.error(f"Critical error while placing {side.capitalize()} order at {new_price:.4f}: {e}")
+                            continue
                     else:
-                        logging.warning(f"New order price {new_price:.4f} is outside the dynamic grid. Skipping.")
+                        logging.debug(f"{side.capitalize()} order at {new_price:.4f} already exists locally.")
                 else:
-                    logging.warning(f"Filled order at {rounded_filled_price:.4f} not found in local open orders.")
-
-
-
-
-
-
-            # Αναπλήρωση ελλείψεων στο grid
-            current_buy_orders = list(set(price for price, order in open_orders.items() if order["side"] == "buy"))
-            current_sell_orders = list(set(price for price, order in open_orders.items() if order["side"] == "sell"))
-
-            logging.info(f"Current grid status - Buy orders: {len(current_buy_orders)}, Sell orders: {len(current_sell_orders)} ")
-            logging.debug(f"Grid Count {GRID_COUNT}")
-
-
-            GRID_COUNT_TOTAL = GRID_COUNT * 2
-            
-            if len(open_orders) >= GRID_COUNT * 2:
-                logging.info(
-                f"WARNING: Reached maximum open orders limit. "
-                f"Grid replenishment skipped to avoid exceeding the defined Grid_count ({GRID_COUNT_TOTAL}) "
-                f"or the available capital."
-            )
-            
+                    logging.warning(f"New order price {new_price:.4f} is outside the dynamic grid. Skipping.")
             else:
-                # Λογική αναπλήρωσης για buy και sell παραγγελίες
-                while len(current_buy_orders) < GRID_COUNT:
-                    new_buy_price = round(min(current_buy_orders or buy_prices) - GRID_SIZE, 4)
-                    if new_buy_price > 0 and new_buy_price not in open_orders:
-                        try:
-                            order = place_order(exchange, "buy", new_buy_price, AMOUNT)
-                            if order:
-                                open_orders[new_buy_price] = order
-                                current_buy_orders.append(new_buy_price)
-                                statistics["total_buys"] += 1
-                                logging.info(f"Placed missing Buy order at {new_buy_price:.4f}")
-                            else:
-                                logging.warning(f"Failed to place Buy order at {new_buy_price:.4f}.")
-                                return
-                                
-                        except Exception as e:
-                            logging.error(f"Error placing buy order at {new_buy_price}: {e}")
-                    else:
-                        break
-
-                while len(current_sell_orders) < GRID_COUNT:
-                    new_sell_price = round(max(current_sell_orders or sell_prices) + GRID_SIZE, 4)
-                    if new_sell_price not in open_orders:
-                        try:
-                            order = place_order(exchange, "sell", new_sell_price, AMOUNT)
-                            if order:
-                                open_orders[new_sell_price] = order
-                                current_sell_orders.append(new_sell_price)
-                                statistics["total_sells"] += 1
-                                logging.info(f"Placed missing Sell order at {new_sell_price:.4f}")
-                            else:
-                                logging.warning(f"Failed to place Sell order at {new_sell_price:.4f}.")
-                                return
-                                
-                        except Exception as e:
-                            logging.error(f"Error placing sell order at {new_sell_price}: {e}")
-                    else:
-                        break
+                logging.warning(f"Filled order at {rounded_filled_price:.4f} not found in local open orders.")
 
 
-            logging.debug(f"Open orders to be saved: {open_orders}")
+
+
+
+
+        # Αναπλήρωση ελλείψεων στο grid
+        current_buy_orders = list(set(price for price, order in open_orders.items() if order["side"] == "buy"))
+        current_sell_orders = list(set(price for price, order in open_orders.items() if order["side"] == "sell"))
+
+        logging.info(f"Current grid status - Buy orders: {len(current_buy_orders)}, Sell orders: {len(current_sell_orders)} ")
+        logging.debug(f"Grid Count {GRID_COUNT}")
+
+
+        GRID_COUNT_TOTAL = GRID_COUNT * 2
+        
+        if len(open_orders) >= GRID_COUNT * 2:
+            logging.info(f"Reached maximum open orders limit.")
+            logging.info(f"Grid replenishment skipped to avoid exceeding the defined Grid_count ({GRID_COUNT_TOTAL}) or the available capital."
+        )
+        
+        else:
+            # Λογική αναπλήρωσης για buy και sell παραγγελίες
+            while len(current_buy_orders) < GRID_COUNT:
+                new_buy_price = round(min(current_buy_orders or buy_prices) - GRID_SIZE, 4)
+                if new_buy_price > 0 and new_buy_price not in open_orders:
+                    try:
+                        order = place_order(exchange, "buy", new_buy_price, AMOUNT)
+                        if order:
+                            open_orders[new_buy_price] = order
+                            current_buy_orders.append(new_buy_price)
+                            statistics["total_buys"] += 1
+                            logging.info(f"Placed missing Buy order at {new_buy_price:.4f}")
+                        else:
+                            logging.warning(f"Failed to place Buy order at {new_buy_price:.4f}.")
+                            return
+                            
+                    except Exception as e:
+                        logging.error(f"Error placing buy order at {new_buy_price}: {e}")
+                else:
+                    break
+
+            while len(current_sell_orders) < GRID_COUNT:
+                new_sell_price = round(max(current_sell_orders or sell_prices) + GRID_SIZE, 4)
+                if new_sell_price not in open_orders:
+                    try:
+                        order = place_order(exchange, "sell", new_sell_price, AMOUNT)
+                        if order:
+                            open_orders[new_sell_price] = order
+                            current_sell_orders.append(new_sell_price)
+                            statistics["total_sells"] += 1
+                            logging.info(f"Placed missing Sell order at {new_sell_price:.4f}")
+                        else:
+                            logging.warning(f"Failed to place Sell order at {new_sell_price:.4f}.")
+                            return
+                            
+                    except Exception as e:
+                        logging.error(f"Error placing sell order at {new_sell_price}: {e}")
+                else:
+                    break
+
+
+
+        logging.debug(f"Open orders to be saved: {open_orders}")
+        
+        # Αποθήκευση ενημερωμένων δεδομένων
+        save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders, statistics, silent=True)
+        
+        logging.info(f"Saved open orders and statistics to {OPEN_ORDERS_FILE}.")
+       
+        # Μετά την ολοκλήρωση του iteration
+        iteration_end = time.time()
+        logging.info(f"Bot execution completed in {iteration_end - iteration_start:.2f} seconds.")
+        
+        
+        
+
+    except Exception as e:
+        logging.exception(f"Error in grid trading loop: {e}")
+    finally:
+        save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders, statistics, silent=True)        
             
-            # Αποθήκευση ενημερωμένων δεδομένων
-            save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders, statistics, silent=True)
-            
-            logging.info("Open orders saved to file.")
-           
-            # Μετά την ολοκλήρωση του iteration
-            iteration_end = time.time()
-            logging.info(f"Loop iteration completed in {iteration_end - iteration_start:.2f} seconds.")
-            
-            
-            time.sleep(UPDATE_INTERVAL)
-
-        except Exception as e:
-            logging.exception(f"Error in grid trading loop: {e}")
-            time.sleep(UPDATE_INTERVAL)
-
-
 
 
 if __name__ == "__main__":
     try:
-        run_grid_trading_bot(AMOUNT)
+        if is_paused():
+            logging.warning("Pause flag detected. Skipping this cycle...")
+        else:
+            run_grid_trading_bot(AMOUNT)
     except Exception as e:
-        import logging
         logging.error(f"An unexpected error occurred: {e}", exc_info=True)
         print("An error occurred. Check the logs for more details.")
