@@ -615,24 +615,67 @@ def handle_excess_orders(exchange, buy_orders, sell_orders):
         
         while excess > 0:
             if buy_orders and len(buy_orders) > len(sell_orders):
-                order_to_cancel = buy_orders.pop()
-                try:
-                    exchange.cancel_order(order_to_cancel['id'], SYMBOL)
-                    logging.info(f"Canceled excess buy order at price: {order_to_cancel['price']}")
-                except Exception as e:
-                    logging.error(f"Failed to cancel excess buy order: {e}")
+                price_to_cancel = buy_orders.pop()
+                logging.info(f"Price of buy order to cancel: {price_to_cancel}")
+                
+                # Fetch open orders
+                open_orders = fetch_open_orders(exchange)
+
+                orders_summary = ', '.join(
+                    ["id={}, price={}, side={}, status={}".format(
+                        order.get('id'),
+                        order.get('price'),
+                        order.get('side'),
+                        order.get('status')
+                    ) for order in open_orders]
+                )
+                logging.info("Fetched open orders: [{}]".format(orders_summary))
+                
+
+
+                
+                # Find the matching order
+                order_to_cancel = next(
+                    (order for order in open_orders if abs(float(order['price']) - price_to_cancel) < 0.0001),
+                    None
+                )
+                
+                if not order_to_cancel:
+                    logging.warning(f"No matching buy order found for price: {price_to_cancel}")
+                else:
+                    try:
+                        exchange.cancel_order(order_to_cancel['id'], SYMBOL)
+                        logging.info(f"Successfully canceled buy order at price: {order_to_cancel['price']}")
+                    except Exception as e:
+                        logging.error(f"Failed to cancel buy order: {e}")
             elif sell_orders:
-                order_to_cancel = sell_orders.pop()
-                try:
-                    exchange.cancel_order(order_to_cancel['id'], SYMBOL)
-                    logging.info(f"Canceled excess sell order at price: {order_to_cancel['price']}")
-                except Exception as e:
-                    logging.error(f"Failed to cancel excess sell order: {e}")
+                price_to_cancel = sell_orders.pop()
+                logging.info(f"Price of sell order to cancel: {price_to_cancel}")
+                
+                # Fetch open orders
+                open_orders = fetch_open_orders(exchange)
+                logging.info(f"Fetched open orders: {open_orders}")
+                
+                # Find the matching order
+                order_to_cancel = next(
+                    (order for order in open_orders if abs(float(order['price']) - price_to_cancel) < 0.0001),
+                    None
+                )
+                
+                if not order_to_cancel:
+                    logging.warning(f"No matching sell order found for price: {price_to_cancel}")
+                else:
+                    try:
+                        exchange.cancel_order(order_to_cancel['id'], SYMBOL)
+                        logging.info(f"Successfully canceled sell order at price: {order_to_cancel['price']}")
+                    except Exception as e:
+                        logging.error(f"Failed to cancel sell order: {e}")
             excess -= 1
         
         send_push_notification(f"ALERT: Grid range adjusted successfully!")
     else:
         logging.info(f"No excess orders detected. ({total_orders})")
+
 
         
 
