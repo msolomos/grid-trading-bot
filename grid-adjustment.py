@@ -562,10 +562,12 @@ def maintain_order_balance(exchange, current_price, buy_orders, sell_orders, new
                         "price": float(order['price']),
                         "side": "buy",
                     })
-                    logging.info(f"Placed new buy order at price: {price:.4f}")
+                    logging.info(f"Placed new buy order at price: {price:.4f} to maintain order balance.")
+                    # Επιπλέον logging με βασικές πληροφορίες της παραγγελίας
+                    logging.info(f"Order Details - ID: {order['id']}, Price: {order['price']:.4f}, Amount: {AMOUNT}, Side: buy")                    
             except Exception as e:
                 logging.error(f"Failed to place new buy order at price {price:.4f}: {e}")
-                break
+                
 
     # Επαλήθευση ισορροπίας για sell παραγγελίες
     while (len(new_sell_orders) + len(sell_orders)) < (len(new_buy_orders) + len(buy_orders)):
@@ -594,10 +596,12 @@ def maintain_order_balance(exchange, current_price, buy_orders, sell_orders, new
                         "price": float(order['price']),
                         "side": "sell",
                     })
-                    logging.info(f"Placed new sell order at price: {price:.4f}")
+                    logging.info(f"Placed new sell order at price: {price:.4f} to maintain order balance.")
+                    # Επιπλέον logging με βασικές πληροφορίες της παραγγελίας
+                    logging.info(f"Order Details - ID: {order['id']}, Price: {order['price']:.4f}, Amount: {AMOUNT}, Side: sell")                    
             except Exception as e:
                 logging.error(f"Failed to place new sell order at price {price:.4f}: {e}")
-                break
+                
 
 
 
@@ -616,7 +620,6 @@ def handle_excess_orders(exchange, buy_orders, sell_orders):
         while excess > 0:
             if buy_orders and len(buy_orders) > len(sell_orders):
                 price_to_cancel = buy_orders.pop()
-                logging.info(f"Price of buy order to cancel: {price_to_cancel}")
                 
                 # Fetch open orders
                 open_orders = fetch_open_orders(exchange)
@@ -629,14 +632,11 @@ def handle_excess_orders(exchange, buy_orders, sell_orders):
                         order.get('status')
                     ) for order in open_orders]
                 )
-                logging.info("Fetched open orders: [{}]".format(orders_summary))
-                
-
-
+                logging.debug("Fetched open orders: [{}]".format(orders_summary))
                 
                 # Find the matching order
                 order_to_cancel = next(
-                    (order for order in open_orders if abs(float(order['price']) - price_to_cancel) < 0.0001),
+                    (order for order in open_orders if order['id'] == price_to_cancel),  # Αναζήτηση με βάση το id
                     None
                 )
                 
@@ -644,13 +644,13 @@ def handle_excess_orders(exchange, buy_orders, sell_orders):
                     logging.warning(f"No matching buy order found for price: {price_to_cancel}")
                 else:
                     try:
+                        logging.info(f"Price of buy order to cancel: {order_to_cancel['price']}, Order ID: {order_to_cancel['id']}")
                         exchange.cancel_order(order_to_cancel['id'], SYMBOL)
                         logging.info(f"Successfully canceled buy order at price: {order_to_cancel['price']}")
                     except Exception as e:
                         logging.error(f"Failed to cancel buy order: {e}")
             elif sell_orders:
                 price_to_cancel = sell_orders.pop()
-                logging.info(f"Price of sell order to cancel: {price_to_cancel}")
                 
                 # Fetch open orders
                 open_orders = fetch_open_orders(exchange)
@@ -658,7 +658,7 @@ def handle_excess_orders(exchange, buy_orders, sell_orders):
                 
                 # Find the matching order
                 order_to_cancel = next(
-                    (order for order in open_orders if abs(float(order['price']) - price_to_cancel) < 0.0001),
+                    (order for order in open_orders if order['id'] == price_to_cancel),  # Αναζήτηση με βάση το id
                     None
                 )
                 
@@ -666,6 +666,7 @@ def handle_excess_orders(exchange, buy_orders, sell_orders):
                     logging.warning(f"No matching sell order found for price: {price_to_cancel}")
                 else:
                     try:
+                        logging.info(f"Price of sell order to cancel: {order_to_cancel['price']}, Order ID: {order_to_cancel['id']}")
                         exchange.cancel_order(order_to_cancel['id'], SYMBOL)
                         logging.info(f"Successfully canceled sell order at price: {order_to_cancel['price']}")
                     except Exception as e:
@@ -675,6 +676,7 @@ def handle_excess_orders(exchange, buy_orders, sell_orders):
         send_push_notification(f"ALERT: Grid range adjusted successfully!")
     else:
         logging.info(f"No excess orders detected. ({total_orders})")
+
 
 
         
