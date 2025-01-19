@@ -534,9 +534,9 @@ def check_orders_status(exchange, open_orders, current_price):
                 elif status == "open":
                     logging.debug(f"Order {order_id} at {rounded_price:.4f} is still active.")
                 elif status in ["canceled"]:
-                    logging.warning(f"Order {order_id} at {rounded_price:.4f} was canceled by the user. Removing from open_orders.")
+                    logging.debug(f"Order {order_id} at {rounded_price:.4f} was canceled by the user. Retaining locally.")
                     cancelled_orders.append(rounded_price)
-                    orders_to_remove.append(rounded_price)                    
+                    #orders_to_remove.append(rounded_price)                    
                 elif status in ["rejected", "expired"]:
                     logging.warning(f"Order {order_id} at {rounded_price:.4f} is {status}. Removing from open_orders.")
                     orders_to_remove.append(rounded_price)
@@ -553,7 +553,13 @@ def check_orders_status(exchange, open_orders, current_price):
             logging.info(f"Order at {price:.4f} removed from open_orders.")
 
     # Καταγραφή κατάστασης
-    logging.info(f"Current open orders after processing: {len(open_orders)} orders remain unchanged.")
+    active_orders = {price: order for price, order in open_orders.items() if order.get("status") != "canceled"}
+
+    canceled_orders = {price: order for price, order in open_orders.items() if order.get("status") == "canceled"}
+
+    logging.info(f"Active orders: {len(active_orders)}, Canceled orders: {len(canceled_orders)}.")
+
+
     logging.info(
         f"Filled orders in this iteration: {filled_orders}. "
         f"Removed orders in this iteration: {orders_to_remove}. "
@@ -589,6 +595,9 @@ def fetch_open_orders_from_exchange(exchange, symbol):
 def reconcile_open_orders(exchange, symbol, local_orders):
     """
     Συμφιλίωση τοπικών παραγγελιών με τις ενεργές παραγγελίες στο Exchange, με προτεραιότητα στα δεδομένα του Exchange.
+    Επιστρέφει:
+    - Τα ενεργά open orders (local_orders)
+    - Ένα dictionary με τις ακυρωμένες παραγγελίες.
     """
     try:
         # Φέρε τις ενεργές παραγγελίες από το Exchange
@@ -598,26 +607,34 @@ def reconcile_open_orders(exchange, symbol, local_orders):
 
         logging.debug(f"Fetched {len(exchange_orders)} open orders from Exchange")
 
+        canceled_orders = {}  # Dictionary για τις ακυρωμένες παραγγελίες
+
         # Ενημέρωση τοπικών παραγγελιών βάσει Exchange
         for price, local_order in list(local_orders.items()):
             order_id = local_order.get("id")
             
+            # Debug για να δεις τι συγκρίνεται
+            logging.debug(f"Comparing local order ID {order_id} with Exchange IDs {exchange_order_ids.keys()}")            
+            
             # Αν η παραγγελία δεν υπάρχει στο Exchange, ελέγξτε την κατάσταση
             if order_id not in exchange_order_ids:
-                # Προσπαθήστε να ανακτήσετε την κατάσταση της παραγγελίας από το Exchange
                 try:
                     order_status = exchange.fetch_order_status(order_id, symbol)
                     if order_status == "canceled":
-                        logging.info(f"Local order ID {order_id} at price {price} {CRYPTO_CURRENCY} was canceled on Exchange. Removing from local orders.")
+                        #logging.info(f"Local order ID {order_id} at price {price} {CRYPTO_CURRENCY} was canceled on Exchange. Removing from local orders.")
+                        local_orders[price]["status"] = "canceled"  # Ενημέρωση status στο αρχειο json
+                        canceled_orders[price] = local_order  # Προσθήκη στην λίστα ακυρωμένων
                     elif order_status == "filled":
                         logging.info(f"Local order ID {order_id} at price {price} {CRYPTO_CURRENCY} was filled on Exchange. Removing from local orders.")
+                        # Διαγράψτε την παραγγελία από το τοπικό αρχείο
+                        del local_orders[price]
                     else:
                         logging.warning(f"Local order ID {order_id} at price {price} {CRYPTO_CURRENCY} not found on Exchange for an unknown reason. Removing from local orders.")
+                        # Διαγράψτε την παραγγελία από το τοπικό αρχείο
+                        del local_orders[price]                        
                 except Exception as e:
                     logging.error(f"Failed to fetch status for order ID {order_id} at price {price}: {e}. Assuming it no longer exists and removing it.")
 
-                # Διαγράψτε την παραγγελία από το τοπικό αρχείο
-                del local_orders[price]
                 continue
 
             # Ενημέρωση παραγγελίας που υπάρχει και τοπικά και στο Exchange
@@ -629,22 +646,38 @@ def reconcile_open_orders(exchange, symbol, local_orders):
                 logging.info(f"Adding missing order from Exchange at price {price}")
                 local_orders[price] = exchange_order
 
-        # Έλεγχος για αναντιστοιχίες και πιθανές αστοχίες
-        local_prices = set(local_orders.keys())
-        exchange_prices_set = set(exchange_prices.keys())
-        if local_prices != exchange_prices_set:
-            logging.warning(
-                f"Mismatch in orders: Local only: {local_prices - exchange_prices_set}, "
-                f"Exchange only: {exchange_prices_set - local_prices}"
-            )
+        # # Έλεγχος για αναντιστοιχίες και πιθανές αστοχίες
+        # local_prices = set(local_orders.keys())
+        # exchange_prices_set = set(exchange_prices.keys())
+        # if local_prices != exchange_prices_set:
+            # logging.warning(
+                # f"Mismatch in orders: Local only: {local_prices - exchange_prices_set}, "
+                # f"Exchange only: {exchange_prices_set - local_prices}"
+            # )
 
         logging.info(f"Reconciliation completed.")
         logging.debug(f"Reconciliation completed. Active orders: {len(local_orders)}")
-        return local_orders
+        
+        
+        return local_orders, canceled_orders  # Επιστροφή ενεργών και ακυρωμένων παραγγελιών
 
     except Exception as e:
         logging.error(f"Error during reconciliation: {e}")
         raise
+
+
+
+
+def find_order_by_id(canceled_orders, search_id):
+    """
+    Βρίσκει παραγγελία στο dictionary canceled_orders με βάση το ID.
+    """
+    return next(
+        (order for order in canceled_orders.values() if order["id"] == search_id),
+        None
+    )
+
+
 
 
 
@@ -673,11 +706,16 @@ def run_grid_trading_bot(AMOUNT):
 
     # Συγχρονισμός με τα πραγματικά open orders από την Binance
     logging.info("Reconciling local open orders with Binance...")
-    open_orders = reconcile_open_orders(exchange, SYMBOL, open_orders)
+    open_orders, canceled_orders = reconcile_open_orders(exchange, SYMBOL, open_orders)
     logging.debug(f"Reconciliation complete. Active orders: {open_orders}")
+    
+    # Αναφορά για τις ακυρωμένες παραγγελίες
+    if canceled_orders:
+        for price, order in canceled_orders.items():
+            logging.debug(f"Canceled order detected: Price {price}, ID {order['id']}")    
 
     # Αποθήκευση του συγχρονισμένου state
-    save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders)
+    #save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders)
 
     # Βρες την τρέχουσα τιμή
     current_price = get_current_price(exchange)
@@ -836,66 +874,112 @@ def run_grid_trading_bot(AMOUNT):
         # Πρώτος έλεγχος - μέγιστος αριθμός παραγγελιών
         if len(open_orders) >= MAX_ORDERS:
             logging.info(f"Reached maximum open orders limit.")
-            logging.info(f"Grid replenishment skipped to avoid exceeding the defined Grid_count ({MAX_ORDERS}) or the available capital."
-        )
-        
-        # Διαφορετικά εκτελούμε την λογική της αναπλήρωσης
+            logging.info(f"Grid replenishment skipped to avoid exceeding the defined Grid_count ({MAX_ORDERS}) or the available capital.")
         else:
-            # Λογική αναπλήρωσης για buy και sell παραγγελίες           
+            # Λογική αναπλήρωσης για buy και sell παραγγελίες
             current_buy_orders = list(set(price for price, order in open_orders.items() if order["side"] == "buy"))
             current_sell_orders = list(set(price for price, order in open_orders.items() if order["side"] == "sell"))
 
             logging.info(f"Current grid status - Buy orders: {len(current_buy_orders)}, Sell orders: {len(current_sell_orders)} ")
             logging.debug(f"Grid Count {GRID_COUNT}")            
-            
+
+            logging.debug(f"Current canceled_orders: {canceled_orders}")
+
             
             while len(current_buy_orders) < GRID_COUNT:
                 new_buy_price = round(min(current_buy_orders or buy_prices) - GRID_SIZE, 4)
+                logging.info(f"[Buy Replenishment] Calculated new_buy_price: {new_buy_price:.4f}")
+
                 if new_buy_price > 0 and new_buy_price not in open_orders:
                     try:
+                        skip_replenishment = False
+                        
+                        for price, order in canceled_orders.items():
+                            order_id = order.get("id")
+                            if order_id:
+                                status = get_order_status(exchange, order_id)
+                                logging.info(f"Order ID {order_id} status: {status}")
+                                if status == "canceled":
+                                    logging.info(f"[Buy Replenishment] Skipping replenishment for canceled order. Price: {price:.4f}, ID: {order_id}")
+                                    skip_replenishment = True
+                                    current_buy_orders.append(new_buy_price)
+                                    break
+                        
+                        if skip_replenishment:
+                            continue
+
+                        # Τοποθέτηση νέας παραγγελίας
+                        logging.info(f"[Buy Replenishment] Attempting to place Buy order at price {new_buy_price:.4f}")
                         order = place_order(exchange, "buy", new_buy_price, AMOUNT)
                         if order:
+                            logging.info(f"[Buy Replenishment] Buy order placed successfully. Price: {new_buy_price:.4f}, Order ID: {order['id']}")
                             open_orders[new_buy_price] = order
                             current_buy_orders.append(new_buy_price)
                             statistics["total_buys"] += 1
-                            logging.info(f"Placed missing Buy order at {new_buy_price:.4f}")
                         else:
-                            logging.warning(f"Failed to place Buy order at {new_buy_price:.4f}.")
-                            return
-                            
+                            logging.warning(f"[Buy Replenishment] Failed to place Buy order at price {new_buy_price:.4f}.")
                     except Exception as e:
-                        logging.error(f"Error placing buy order at {new_buy_price}: {e}")
+                        logging.error(f"[Buy Replenishment] Error placing Buy order at {new_buy_price:.4f}: {e}")
                 else:
+                    logging.info(f"[Buy Replenishment] Skipping Buy order placement. Price {new_buy_price:.4f} already in open_orders or invalid.")
                     break
 
             while len(current_sell_orders) < GRID_COUNT:
                 new_sell_price = round(max(current_sell_orders or sell_prices) + GRID_SIZE, 4)
-                if new_sell_price not in open_orders:
+                logging.info(f"[Sell Replenishment] Calculated new_sell_price: {new_sell_price:.4f}")
+
+                if new_sell_price > 0 and new_sell_price not in open_orders:
                     try:
+                        skip_replenishment = False
+                        
+                        for price, order in canceled_orders.items():
+                            order_id = order.get("id")
+                            if order_id:
+                                status = get_order_status(exchange, order_id)
+                                logging.debug(f"Order ID {order_id} status: {status}")
+                                if status == "canceled":
+                                    logging.info(f"[Sell Replenishment] Skipping replenishment for canceled order. Price: {price:.4f}, ID: {order_id}")
+                                    skip_replenishment = True
+                                    current_sell_orders.append(new_sell_price)
+                                    break
+                        
+                        if skip_replenishment:
+                            continue
+
+                        # Τοποθέτηση νέας παραγγελίας
+                        logging.info(f"[Sell Replenishment] Attempting to place Sell order at price {new_sell_price:.4f}")
                         order = place_order(exchange, "sell", new_sell_price, AMOUNT)
                         if order:
+                            logging.info(f"[Sell Replenishment] Sell order placed successfully. Price: {new_sell_price:.4f}, Order ID: {order['id']}")
                             open_orders[new_sell_price] = order
                             current_sell_orders.append(new_sell_price)
                             statistics["total_sells"] += 1
-                            logging.info(f"Placed missing Sell order at {new_sell_price:.4f}")
                         else:
-                            logging.warning(f"Failed to place Sell order at {new_sell_price:.4f}.")
-                            return
-                            
+                            logging.warning(f"[Sell Replenishment] Failed to place Sell order at price {new_sell_price:.4f}.")
                     except Exception as e:
-                        logging.error(f"Error placing sell order at {new_sell_price}: {e}")
+                        logging.error(f"[Sell Replenishment] Error placing Sell order at {new_sell_price:.4f}: {e}")
                 else:
+                    logging.info(f"[Sell Replenishment] Skipping Sell order placement. Price {new_sell_price:.4f} already in open_orders or invalid.")
                     break
-            
-            logging.error(f" Grid replenishment completed.")
 
 
+
+
+
+
+
+
+            logging.info(f"Grid replenishment completed.")
+
+
+        
+        
         logging.debug(f"Open orders to be saved: {open_orders}")
         
         # Αποθήκευση ενημερωμένων δεδομένων
         save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders, statistics, silent=True)
         
-        logging.info(f"Saved open orders and statistics to {OPEN_ORDERS_FILE}.")
+        logging.info(f"Saved open orders (including canceled) and statistics to {OPEN_ORDERS_FILE}.")
        
         # Μετά την ολοκλήρωση του iteration
         iteration_end = time.time()
