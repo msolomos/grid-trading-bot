@@ -9,11 +9,12 @@ import pushover
 # Configuration
 EXCHANGE_NAME = 'binance'
 SYMBOL = 'XRP/USDT'
+BASE_CURRENCY = 'XRP'
+QUOTE_CURRENCY = 'USDT'
 GRID_SIZE = 0.043
 AMOUNT = 50
 GRID_COUNT = 10
 MAX_ORDERS = GRID_COUNT * 2
-CRYPTO_CURRENCY = 'USDT'
 OPEN_ORDERS_FILE = "/opt/python/grid-trading-bot/open_orders.json"
 JSON_PATH = "/opt/python/grid-trading-bot/config.json"
 PAUSE_FLAG_PATH = "/opt/python/grid-trading-bot/pause.flag"
@@ -327,7 +328,7 @@ def fetch_and_initialize_exchange():
     ticker = exchange.fetch_ticker(SYMBOL)
     current_price = ticker['last']
     
-    logging.info(f"Current price: {current_price} {CRYPTO_CURRENCY}")
+    logging.info(f"Current price: {current_price} {QUOTE_CURRENCY}")
     return exchange, current_price
 
 
@@ -535,13 +536,20 @@ def maintain_order_balance(exchange, current_price, buy_orders, sell_orders, new
         return
 
     # Επαλήθευση ισορροπίας για buy παραγγελίες
+    logged_adjusting_message = False  # Flag για το logging
+    
+    
     while (len(new_buy_orders) + len(buy_orders)) < (len(new_sell_orders) + len(sell_orders)):
         total_orders = len(open_orders)
         if total_orders >= MAX_ORDERS:
             logging.info(f"Reached MAX_ORDERS={MAX_ORDERS} while trying to add buy orders. Stopping.")
             break
 
-        logging.info("Adjusting buy orders to maintain balance...")
+        if not logged_adjusting_message:
+            logging.info("Adjusting buy orders to maintain balance...")
+            logged_adjusting_message = True  # Το μήνυμα έχει καταγραφεί μία φορά
+        
+        
         price = round(current_price - GRID_SIZE * (len(buy_orders) + len(new_buy_orders) + 1), 4)
 
         # Επαλήθευση τιμών
@@ -555,6 +563,20 @@ def maintain_order_balance(exchange, current_price, buy_orders, sell_orders, new
         
         if price not in existing_prices:
             try:
+                # Έλεγχος διαθέσιμου balance
+                balance = exchange.fetch_balance()
+                required_amount = price * AMOUNT  # Το ποσό που απαιτείται στο QUOTE_CURRENCY
+                if balance['free'][QUOTE_CURRENCY] < required_amount:
+                    logging.warning(
+                        f"Insufficient balance ({balance['free'][QUOTE_CURRENCY]:.4f} {QUOTE_CURRENCY}) "
+                        f"to place order at price {price:.4f} (requires {required_amount:.4f} {QUOTE_CURRENCY})."
+                    )
+                    send_push_notification(
+                        f"Insufficient balance ({balance['free'][QUOTE_CURRENCY]:.4f} {QUOTE_CURRENCY}) "
+                        f"to place order at price {price:.4f} (requires {required_amount:.4f} {QUOTE_CURRENCY})."
+                    )
+                    return  # Σταματάει τη διαδικασία ή επιστρέφει στο ανώτερο επίπεδο (αναλόγως την ανάγκη σας)
+                
                 order = exchange.create_limit_buy_order(SYMBOL, AMOUNT, price)
                 if isinstance(order, dict) and 'id' in order and 'price' in order:
                     new_buy_orders.append({
@@ -589,6 +611,19 @@ def maintain_order_balance(exchange, current_price, buy_orders, sell_orders, new
         
         if price not in existing_prices:
             try:
+                # Έλεγχος διαθέσιμου balance
+                balance = exchange.fetch_balance()
+                if balance['free'][BASE_CURRENCY] < AMOUNT:  # Ελέγχουμε το BASE_CURRENCY
+                    logging.warning(
+                        f"Insufficient balance ({balance['free'][BASE_CURRENCY]:.4f} {BASE_CURRENCY}) "
+                        f"to place sell order for {AMOUNT:.4f} {BASE_CURRENCY} at price {price:.4f}."
+                    )
+                    send_push_notification(
+                        f"Insufficient balance ({balance['free'][BASE_CURRENCY]:.4f} {BASE_CURRENCY}) "
+                        f"to place sell order for {AMOUNT:.4f} {BASE_CURRENCY} at price {price:.4f}."
+                    )
+                    return  # Σταματάει τη διαδικασία ή επιστρέφει στο ανώτερο επίπεδο (αναλόγως την ανάγκη σας)
+                
                 order = exchange.create_limit_sell_order(SYMBOL, AMOUNT, price)
                 if isinstance(order, dict) and 'id' in order and 'price' in order:
                     new_sell_orders.append({
@@ -607,6 +642,9 @@ def maintain_order_balance(exchange, current_price, buy_orders, sell_orders, new
 
 
 def handle_excess_orders(exchange, buy_orders, sell_orders):
+    """
+    Διαχειρίζεται τις παραγγελίες όταν ο συνολικός αριθμός τους υπερβαίνει το μέγιστο επιτρεπτό όριο (MAX_ORDERS).
+    """
     total_orders = len(buy_orders) + len(sell_orders)
     
     logging.debug(f"Total buy orders: {len(buy_orders)}")
@@ -616,66 +654,53 @@ def handle_excess_orders(exchange, buy_orders, sell_orders):
     if total_orders > MAX_ORDERS:
         excess = total_orders - MAX_ORDERS
         logging.warning(f"Excess orders detected: {excess}. Adjusting...")
-        
-        while excess > 0:
-            if buy_orders and len(buy_orders) > len(sell_orders):
-                price_to_cancel = buy_orders.pop()
-                
-                # Fetch open orders
-                open_orders = fetch_open_orders(exchange)
 
-                orders_summary = ', '.join(
-                    ["id={}, price={}, side={}, status={}".format(
-                        order.get('id'),
-                        order.get('price'),
-                        order.get('side'),
-                        order.get('status')
-                    ) for order in open_orders]
-                )
-                logging.debug("Fetched open orders: [{}]".format(orders_summary))
-                
-                # Find the matching order
-                order_to_cancel = next(
-                    (order for order in open_orders if order['id'] == price_to_cancel),  # Αναζήτηση με βάση το id
-                    None
-                )
-                
-                if not order_to_cancel:
-                    logging.warning(f"No matching buy order found for price: {price_to_cancel}")
-                else:
-                    try:
-                        logging.info(f"Price of buy order to cancel: {order_to_cancel['price']}, Order ID: {order_to_cancel['id']}")
-                        exchange.cancel_order(order_to_cancel['id'], SYMBOL)
-                        logging.info(f"Successfully canceled buy order at price: {order_to_cancel['price']}")
-                    except Exception as e:
-                        logging.error(f"Failed to cancel buy order: {e}")
+        # Fetch open orders once to avoid repetitive API calls
+        open_orders = fetch_open_orders(exchange)
+        orders_summary = ', '.join(
+            ["id={}, price={}, side={}, status={}".format(
+                order.get('id'),
+                order.get('price'),
+                order.get('side'),
+                order.get('status')
+            ) for order in open_orders]
+        )
+        logging.debug(f"Fetched open orders: [{orders_summary}]")
+
+        while excess > 0:
+            # Determine which list to reduce (buy or sell orders)
+            if buy_orders and (not sell_orders or len(buy_orders) > len(sell_orders)):
+                price_to_cancel = buy_orders.pop()
+                order_side = "buy"
             elif sell_orders:
                 price_to_cancel = sell_orders.pop()
-                
-                # Fetch open orders
-                open_orders = fetch_open_orders(exchange)
-                logging.info(f"Fetched open orders: {open_orders}")
-                
-                # Find the matching order
-                order_to_cancel = next(
-                    (order for order in open_orders if order['id'] == price_to_cancel),  # Αναζήτηση με βάση το id
-                    None
-                )
-                
-                if not order_to_cancel:
-                    logging.warning(f"No matching sell order found for price: {price_to_cancel}")
-                else:
-                    try:
-                        logging.info(f"Price of sell order to cancel: {order_to_cancel['price']}, Order ID: {order_to_cancel['id']}")
-                        exchange.cancel_order(order_to_cancel['id'], SYMBOL)
-                        logging.info(f"Successfully canceled sell order at price: {order_to_cancel['price']}")
-                    except Exception as e:
-                        logging.error(f"Failed to cancel sell order: {e}")
+                order_side = "sell"
+            else:
+                break  # Δεν υπάρχουν άλλες παραγγελίες για ακύρωση
+
+            # Find the matching order
+            order_to_cancel = next(
+                (order for order in open_orders if order['id'] == price_to_cancel),
+                None
+            )
+            
+            if not order_to_cancel:
+                logging.warning(f"No matching {order_side} order found for price: {price_to_cancel}")
+            else:
+                try:
+                    logging.info(
+                        f"Price of {order_side} order to cancel: {order_to_cancel['price']}, Order ID: {order_to_cancel['id']}"
+                    )
+                    exchange.cancel_order(order_to_cancel['id'], SYMBOL)
+                    logging.info(f"Successfully canceled {order_side} order at price: {order_to_cancel['price']}")
+                except Exception as e:
+                    logging.error(f"Failed to cancel {order_side} order: {e}")
             excess -= 1
-        
-        send_push_notification(f"ALERT: Grid range adjusted successfully!")
+
+        send_push_notification("ALERT: Grid range adjusted successfully!")
     else:
         logging.info(f"No excess orders detected. ({total_orders})")
+
 
 
 
