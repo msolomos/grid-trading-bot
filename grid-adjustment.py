@@ -371,7 +371,7 @@ def find_farthest_orders(buy_orders, sell_orders):
     logging.info(f"Farthest sell order: {farthest_sell_order}")
     return farthest_buy_order, farthest_sell_order
 
-def find_orders_out_of_range(open_orders, current_price, buy_orders, sell_orders):
+def find_orders_out_of_range(open_orders, current_price, buy_orders, sell_orders, tolerance=0.0):
     orders_to_cancel = []
     new_buy_orders = []
     new_sell_orders = []
@@ -384,24 +384,24 @@ def find_orders_out_of_range(open_orders, current_price, buy_orders, sell_orders
     farthest_sell_order = sell_orders[-1] if sell_orders else None
 
     # Έλεγχος για ακύρωση της πιο απομακρυσμένης buy παραγγελίας
-    if farthest_buy_order and farthest_buy_order < lower_bound:
+    if farthest_buy_order and farthest_buy_order < (lower_bound - tolerance):
         try:            
             order = next((order for order in open_orders if abs(float(order['price']) - farthest_buy_order) < 0.0001), None)
             
             orders_to_cancel.append(order)
             logging.info(f"Buy order at price {farthest_buy_order} is out of range. "
-                         f"Lower bound: {lower_bound:.4f}. It will be canceled.")
+                         f"Lower bound (with tolerance): {lower_bound - tolerance:.4f}. It will be canceled.")
         except Exception as e:
             logging.error(f"Error finding farthest buy order: {e}")
 
     # Έλεγχος για ακύρωση της πιο απομακρυσμένης sell παραγγελίας
-    if farthest_sell_order and farthest_sell_order > upper_bound:
+    if farthest_sell_order and farthest_sell_order > (upper_bound + tolerance):
         try:
             order = next((order for order in open_orders if abs(float(order['price']) - farthest_sell_order) < 0.0001), None)
 
             orders_to_cancel.append(order)
             logging.info(f"Sell order at price {farthest_sell_order} is out of range. "
-                         f"Upper bound: {upper_bound:.4f}. It will be canceled.")
+                         f"Upper bound (with tolerance): {upper_bound + tolerance:.4f}. It will be canceled.")
         except Exception as e:
             logging.error(f"Error finding farthest sell order: {e}")
     
@@ -414,6 +414,7 @@ def find_orders_out_of_range(open_orders, current_price, buy_orders, sell_orders
     logging.debug(f"Orders to cancel (prices): {[order['price'] for order in orders_to_cancel if isinstance(order, dict)]}")
 
     return orders_to_cancel, new_buy_orders, new_sell_orders
+
 
 
 
@@ -641,9 +642,10 @@ def maintain_order_balance(exchange, current_price, buy_orders, sell_orders, new
 
 
 
-def handle_excess_orders(exchange, buy_orders, sell_orders):
+def handle_excess_orders(exchange, buy_orders, sell_orders, current_price):
     """
-    Διαχειρίζεται τις παραγγελίες όταν ο συνολικός αριθμός τους υπερβαίνει το μέγιστο επιτρεπτό όριο (MAX_ORDERS).
+    Διαχειρίζεται τις παραγγελίες όταν ο συνολικός αριθμός τους υπερβαίνει το μέγιστο επιτρεπτό όριο (MAX_ORDERS),
+    δίνοντας προτεραιότητα στην ακύρωση παραγγελιών που είναι λιγότερο πιθανό να εκτελεστούν.
     """
     total_orders = len(buy_orders) + len(sell_orders)
     
@@ -667,23 +669,30 @@ def handle_excess_orders(exchange, buy_orders, sell_orders):
         )
         logging.debug(f"Fetched open orders: [{orders_summary}]")
 
+        # Ακύρωση των λιγότερο πιθανών να εκτελεστούν
         while excess > 0:
-            # Determine which list to reduce (buy or sell orders)
-            if buy_orders and (not sell_orders or len(buy_orders) > len(sell_orders)):
-                price_to_cancel = buy_orders.pop()
+            # Υπολογισμός απόστασης από την τρέχουσα τιμή
+            buy_orders_sorted = sorted(buy_orders, key=lambda price: abs(price - current_price), reverse=True)
+            sell_orders_sorted = sorted(sell_orders, key=lambda price: abs(price - current_price), reverse=True)
+
+            # Επιλέγουμε παραγγελίες με βάση την απόσταση από την τρέχουσα τιμή
+            if buy_orders_sorted and (not sell_orders_sorted or abs(buy_orders_sorted[0] - current_price) > abs(sell_orders_sorted[0] - current_price)):
+                price_to_cancel = buy_orders_sorted.pop(0)  # Πιο μακρινή buy
+                buy_orders.remove(price_to_cancel)
                 order_side = "buy"
-            elif sell_orders:
-                price_to_cancel = sell_orders.pop()
+            elif sell_orders_sorted:
+                price_to_cancel = sell_orders_sorted.pop(0)  # Πιο μακρινή sell
+                sell_orders.remove(price_to_cancel)
                 order_side = "sell"
             else:
-                break  # Δεν υπάρχουν άλλες παραγγελίες για ακύρωση
+                break  # Δεν υπάρχουν άλλες παραγγελίες προς ακύρωση
 
-            # Find the matching order
+            # Βρίσκουμε την παραγγελία από τα open_orders
             order_to_cancel = next(
-                (order for order in open_orders if order['id'] == price_to_cancel),
+                (order for order in open_orders if abs(float(order['price']) - price_to_cancel) < 0.0001),
                 None
             )
-            
+
             if not order_to_cancel:
                 logging.warning(f"No matching {order_side} order found for price: {price_to_cancel}")
             else:
@@ -700,6 +709,7 @@ def handle_excess_orders(exchange, buy_orders, sell_orders):
         send_push_notification("ALERT: Grid range adjusted successfully!")
     else:
         logging.info(f"No excess orders detected. ({total_orders})")
+
 
 
 
@@ -735,8 +745,9 @@ def adjust_grid_range():
         buy_orders, sell_orders = separate_buy_sell_orders(open_orders)
 
         # 4) Εντοπισμός παραγγελιών που είναι εκτός range
+        tolerance = current_price * 0.01  # 1% του current_price
         orders_to_cancel, new_buy_orders, new_sell_orders = find_orders_out_of_range(
-            open_orders, current_price, buy_orders, sell_orders
+            open_orders, current_price, buy_orders, sell_orders, tolerance
         )
 
         logging.debug(f"4) Type of open_orders: {type(open_orders)}")
@@ -803,7 +814,7 @@ def adjust_grid_range():
         maintain_order_balance(exchange, current_price, buy_orders, sell_orders, new_buy_orders, new_sell_orders)
 
         # 7) Έλεγχος & διόρθωση για υπερβάλλοντες παραγγελίες
-        handle_excess_orders(exchange, buy_orders, sell_orders)
+        handle_excess_orders(exchange, buy_orders, sell_orders, current_price)
         
         
         # 8) Στο τέλος του adjust_grid_range
