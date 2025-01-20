@@ -712,6 +712,28 @@ def find_order_by_id(canceled_orders, search_id):
 # 7. ---------------------- Main Bot Logic ----------------------
 def run_grid_trading_bot(AMOUNT):
        
+    max_retries = 5  # Μέγιστος αριθμός προσπαθειών
+    retries = 0
+    waited_for_pause = False  # Σημαία για να ελέγξουμε αν υπήρξε αναμονή λόγω pause
+
+    # Έλεγχος αν το pause flag είναι ενεργό
+    while is_paused():
+        waited_for_pause = True  # Καταγράφουμε ότι το bot περίμενε
+        if retries >= max_retries:
+            logging.error("Pause flag remains active after multiple retries. Exiting to avoid infinite loop.")
+            raise RuntimeError("Maximum retries exceeded while waiting for pause flag to clear.")
+        
+        logging.warning(f"Pause flag detected. Retrying in 30 seconds... (Attempt {retries + 1}/{max_retries})")
+        retries += 1
+        time.sleep(30)  # Αναμονή 30 sec
+
+    # Εμφάνιση μηνύματος μόνο αν έγινε αναμονή λόγω pause
+    if waited_for_pause:
+        logging.info("Pause flag cleared. Resuming bot execution.")
+        
+
+    # Υλοποίηση της κύριας λογικής του bot
+   
     logging.info(f">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
     logging.info(f"Starting {SYMBOL} Grid Trading bot...")
     iteration_start = time.time()
@@ -1023,22 +1045,9 @@ def run_grid_trading_bot(AMOUNT):
 
 
 if __name__ == "__main__":
-    try:
-        max_retries = 5  # Μέγιστος αριθμός προσπαθειών
-        retries = 0
-
-        while is_paused():
-            if retries >= max_retries:
-                logging.error("Pause flag remains active after multiple retries. Exiting to avoid infinite loop.")
-                raise RuntimeError("Maximum retries exceeded while waiting for pause flag to clear.")
-            
-            logging.warning(f"Pause flag detected. Retrying in 1 minute... (Attempt {retries + 1}/{max_retries})")
-            retries += 1
-            time.sleep(60)  # Αναμονή ενός λεπτού
-
-        # Αν το pause flag δεν είναι ενεργό, εκτέλεση του bot
+    try:        
         run_grid_trading_bot(AMOUNT)
 
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}", exc_info=True)
-        print("An error occurred. Check the logs for more details.")
+        
