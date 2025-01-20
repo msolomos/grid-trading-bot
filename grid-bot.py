@@ -354,7 +354,9 @@ def check_balance(exchange, currency, required_amount):
 def place_order(exchange, side, price, AMOUNT):
     global mock_order_counter
     rounded_price = round(price, 4)  # Στρογγυλοποίηση τιμής
-    
+    MAX_RETRIES = 3  # Μέγιστος αριθμός προσπαθειών
+    RETRY_DELAY = 30  # Χρόνος καθυστέρησης σε δευτερόλεπτα
+
     if ENABLE_DEMO_MODE:
         # Mock mode: Δημιουργία mock παραγγελίας
         mock_order_counter += 1
@@ -371,55 +373,56 @@ def place_order(exchange, side, price, AMOUNT):
         logging.info(f"[DEMO MODE] Mock order placed: {mock_order}")
         return mock_order
 
+    retries = 0
+    while retries < MAX_RETRIES:  # Προσθήκη retry μηχανισμού
+        # Έλεγχος υπολοίπου πριν από την τοποθέτηση παραγγελίας
+        try:
+            balance = exchange.fetch_balance()
+            required_currency = CRYPTO_CURRENCY if side == "buy" else CRYPTO_SYMBOL
+            available_balance = balance['free'].get(required_currency, 0)
 
-
-    # Έλεγχος υπολοίπου πριν από την τοποθέτηση παραγγελίας
-    try:
-        balance = exchange.fetch_balance()
-        required_currency = CRYPTO_CURRENCY if side == "buy" else CRYPTO_SYMBOL
-        available_balance = balance['free'].get(required_currency, 0)
-
-        if available_balance < AMOUNT:
-            logging.warning(f"Insufficient balance for {side.capitalize()} order at {rounded_price:.4f}. "
-                            f"Available: {available_balance}, Required: {AMOUNT}. Skipping order.")
-            sendgrid_email(
-                transaction_type=side,
-                price=rounded_price,
-                quantity=AMOUNT,
-                reasoning=f"Insufficient balance for {side.capitalize()} order at {rounded_price:.4f}"
-            )
-            send_push_notification(f"Insufficient balance for {side.capitalize()} order at {rounded_price:.4f}")
+            if available_balance < AMOUNT:
+                logging.warning(f"Insufficient balance for {side.capitalize()} order at {rounded_price:.4f}. "
+                                f"Available: {available_balance}, Required: {AMOUNT}. Skipping order.")
+                sendgrid_email(
+                    transaction_type=side,
+                    price=rounded_price,
+                    quantity=AMOUNT,
+                    reasoning=f"Insufficient balance for {side.capitalize()} order at {rounded_price:.4f}"
+                )
+                send_push_notification(f"Insufficient balance for {side.capitalize()} order at {rounded_price:.4f}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Error checking balance: {e}")
             return False
-            
-    except Exception as e:
-        logging.error(f"Error checking balance: {e}")
-        return False
 
+        # Τοποθέτηση παραγγελίας
+        try:
+            logging.info(f"Attempting to place {side} order at {rounded_price:.4f} {CRYPTO_CURRENCY} for {AMOUNT} {CRYPTO_SYMBOL}")
+            order = exchange.create_limit_order(SYMBOL, side, AMOUNT, rounded_price)
+            logging.info(f"Order placed successfully: {order}")
+            return {
+                "id": order.get("id"),  # Διασφάλιση ότι το 'id' υπάρχει
+                "symbol": order.get("symbol", SYMBOL),
+                "price": rounded_price,
+                "side": side,
+                "status": "open"
+            }
+        except ccxt.NetworkError as e:
+            logging.error(f"Network error while placing order at {rounded_price:.4f} ({side}): {e}")            
+        except ccxt.BaseError as e:
+            logging.error(f"Exchange error while placing order at {rounded_price:.4f} ({side}): {e}")            
+        except Exception as e:
+            logging.error(f"Unexpected error while placing order at {rounded_price:.4f} ({side}): {e}")            
 
-    # Τοποθέτηση παραγγελίας
-    try:
-        logging.info(f"Attempting to place {side} order at {rounded_price:.4f} {CRYPTO_CURRENCY} for {AMOUNT} {CRYPTO_SYMBOL}")
-        order = exchange.create_limit_order(SYMBOL, side, AMOUNT, rounded_price)
-        logging.info(f"Order placed successfully: {order}")
-        return {
-            "id": order.get("id"),  # Διασφάλιση ότι το 'id' υπάρχει
-            "symbol": order.get("symbol", SYMBOL),
-            "price": rounded_price,
-            "side": side,
-            "status": "open"
-        }
-    except ccxt.NetworkError as e:
-        logging.error(f"Network error while placing order at {rounded_price:.4f} ({side}): {e}")
-        send_push_notification(f"Error while placing order at {rounded_price:.4f} ({side}): {e}")
-        return None
-    except ccxt.BaseError as e:
-        logging.error(f"Exchange error while placing order at {rounded_price:.4f} ({side}): {e}")
-        send_push_notification(f"Exchange error while placing order at {rounded_price:.4f} ({side}): {e}")
-        return None
-    except Exception as e:
-        logging.error(f"Unexpected error while placing order at {rounded_price:.4f} ({side}): {e}")
-        send_push_notification(f"Error while placing order at {rounded_price:.4f} ({side}): {e}")
-        return None
+        retries += 1
+        logging.warning(f"Retrying to place order ({retries}/{MAX_RETRIES}) in {RETRY_DELAY} seconds...")
+        time.sleep(RETRY_DELAY)
+
+    logging.error("Failed to place order after maximum retries.")
+    return False
+
 
 
 
@@ -966,7 +969,11 @@ def run_grid_trading_bot(AMOUNT):
                             current_buy_orders.append(new_buy_price)
                             statistics["total_buys"] += 1
                         else:
-                            logging.warning(f"[Buy Replenishment] Failed to place Buy order at price {new_buy_price:.4f}.")
+                            logging.warning(f"[Buy Replenishment] Failed to place Buy order at price {new_buy_price:.4f}. Exiting replenishment loop.")
+                            send_push_notification(f"Insufficient balance for buy order at {new_buy_price:.4f}")
+                            break
+
+
                     except Exception as e:
                         logging.error(f"[Buy Replenishment] Error placing Buy order at {new_buy_price:.4f}: {e}")
                 else:
@@ -1005,6 +1012,10 @@ def run_grid_trading_bot(AMOUNT):
                             statistics["total_sells"] += 1
                         else:
                             logging.warning(f"[Sell Replenishment] Failed to place Sell order at price {new_sell_price:.4f}.")
+                            send_push_notification(f"Insufficient balance for sell order at {new_sell_price:.4f}")
+                            break
+
+                            
                     except Exception as e:
                         logging.error(f"[Sell Replenishment] Error placing Sell order at {new_sell_price:.4f}: {e}")
                 else:
