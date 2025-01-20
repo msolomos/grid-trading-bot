@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 import ccxt
@@ -534,7 +534,7 @@ def check_orders_status(exchange, open_orders, current_price):
                 elif status == "open":
                     logging.debug(f"Order {order_id} at {rounded_price:.4f} is still active.")
                 elif status in ["canceled"]:
-                    logging.debug(f"Order {order_id} at {rounded_price:.4f} was canceled by the user. Retaining locally.")
+                    logging.debug(f"Order {order_id} at {rounded_price:.4f} was canceled by grid range bot. Retaining locally.")
                     cancelled_orders.append(rounded_price)
                     #orders_to_remove.append(rounded_price)                    
                 elif status in ["rejected", "expired"]:
@@ -546,14 +546,8 @@ def check_orders_status(exchange, open_orders, current_price):
             logging.error(f"Error processing order at price {rounded_price}: {e}")
             continue  # Συνεχίζει με την επόμενη παραγγελία
 
-    # Ασφαλής διαγραφή παραγγελιών που έχουν γεμίσει ή ακυρωθεί
-    for price in filled_orders + orders_to_remove:
-        if price in open_orders:
-            del open_orders[price]
-            logging.info(f"Order at {price:.4f} removed from open_orders.")
-
     # Καταγραφή κατάστασης
-    active_orders = {price: order for price, order in open_orders.items() if order.get("status") != "canceled"}
+    active_orders = {price: order for price, order in open_orders.items() if order.get("status") == "open"}
 
     canceled_orders = {price: order for price, order in open_orders.items() if order.get("status") == "canceled"}
 
@@ -563,9 +557,17 @@ def check_orders_status(exchange, open_orders, current_price):
     logging.info(
         f"Filled orders in this iteration: {filled_orders}. "
         f"Removed orders in this iteration: {orders_to_remove}. "
-        f"Cancelled orders by user: {cancelled_orders}."
+        f"Cancelled orders by bot: {cancelled_orders}."
     )    
     
+
+    # Ασφαλής διαγραφή παραγγελιών που έχουν γεμίσει ή ακυρωθεί
+    for price in filled_orders + orders_to_remove:
+        if price in open_orders:
+            del open_orders[price]
+            logging.info(f"Order at {price:.4f} removed from open_orders.")
+
+
 
     return filled_orders
 
@@ -591,6 +593,30 @@ def fetch_open_orders_from_exchange(exchange, symbol):
 
 
 
+def fetch_filled_orders_from_exchange(exchange, symbol, since=None,days_ago=1, limit=100):
+    """
+    Φέρνει παραγγελίες με κατάσταση 'filled' από το Exchange για το συγκεκριμένο σύμβολο.
+
+    :param exchange: Αντικείμενο σύνδεσης με το Exchange (π.χ. ccxt.binance())
+    :param symbol: Το σύμβολο για το οποίο θέλουμε τις παραγγελίες (π.χ. "XRP/USDT").
+    :param since: Χρονικό σημείο από το οποίο να ξεκινήσει η αναζήτηση.
+    :param limit: Μέγιστος αριθμός παραγγελιών που θα επιστραφούν.
+    :return: Λίστα παραγγελιών που έχουν ολοκληρωθεί.
+    """
+    try:
+        # Υπολογισμός timestamp για το διάστημα που ψάχνουμε
+        since_timestamp = int((datetime.now() - timedelta(days=days_ago)).timestamp() * 1000)        
+        
+        # Φέρνει το ιστορικό παραγγελιών
+        all_orders = exchange.fetch_orders(symbol, since=since_timestamp, limit=limit)
+        filled_orders = [order for order in all_orders if order['status'] == 'closed']
+        logging.info(f"Successfully fetched {len(filled_orders)} filled orders for {symbol}.")
+        return filled_orders
+    except Exception as e:
+        logging.error(f"Failed to fetch filled orders: {e}")
+        raise
+
+
 
 def reconcile_open_orders(exchange, symbol, local_orders):
     """
@@ -601,8 +627,12 @@ def reconcile_open_orders(exchange, symbol, local_orders):
     """
     try:
         # Φέρε τις ενεργές παραγγελίες από το Exchange
-        exchange_orders = fetch_open_orders_from_exchange(exchange, symbol)
+        exchange_orders = fetch_open_orders_from_exchange(exchange, symbol)      
+        filled_orders = fetch_filled_orders_from_exchange(exchange, symbol)       
+        
         exchange_order_ids = {order['id']: order for order in exchange_orders}
+        filled_order_ids = {order['id']: order for order in filled_orders}
+
         exchange_prices = {round(float(order['price']), 4): order for order in exchange_orders}
 
         logging.debug(f"Fetched {len(exchange_orders)} open orders from Exchange")
@@ -616,6 +646,16 @@ def reconcile_open_orders(exchange, symbol, local_orders):
             # Debug για να δεις τι συγκρίνεται
             logging.debug(f"Comparing local order ID {order_id} with Exchange IDs {exchange_order_ids.keys()}")            
             
+
+
+            # Αν η παραγγελία είναι στα filled orders, ενημέρωσε και διέγραψέ την
+            if order_id in filled_order_ids:
+                logging.info(f"Local order ID {order_id} at price {price} was filled on Exchange. Removing from local orders.")
+                del local_orders[price]
+                continue
+
+                
+            
             # Αν η παραγγελία δεν υπάρχει στο Exchange, ελέγξτε την κατάσταση
             if order_id not in exchange_order_ids:
                 try:
@@ -624,10 +664,6 @@ def reconcile_open_orders(exchange, symbol, local_orders):
                         #logging.info(f"Local order ID {order_id} at price {price} {CRYPTO_CURRENCY} was canceled on Exchange. Removing from local orders.")
                         local_orders[price]["status"] = "canceled"  # Ενημέρωση status στο αρχειο json
                         canceled_orders[price] = local_order  # Προσθήκη στην λίστα ακυρωμένων
-                    elif order_status == "filled":
-                        logging.info(f"Local order ID {order_id} at price {price} {CRYPTO_CURRENCY} was filled on Exchange. Removing from local orders.")
-                        # Διαγράψτε την παραγγελία από το τοπικό αρχείο
-                        del local_orders[price]
                     else:
                         logging.warning(f"Local order ID {order_id} at price {price} {CRYPTO_CURRENCY} not found on Exchange for an unknown reason. Removing from local orders.")
                         # Διαγράψτε την παραγγελία από το τοπικό αρχείο
@@ -645,15 +681,6 @@ def reconcile_open_orders(exchange, symbol, local_orders):
             if price not in local_orders:
                 logging.info(f"Adding missing order from Exchange at price {price}")
                 local_orders[price] = exchange_order
-
-        # # Έλεγχος για αναντιστοιχίες και πιθανές αστοχίες
-        # local_prices = set(local_orders.keys())
-        # exchange_prices_set = set(exchange_prices.keys())
-        # if local_prices != exchange_prices_set:
-            # logging.warning(
-                # f"Mismatch in orders: Local only: {local_prices - exchange_prices_set}, "
-                # f"Exchange only: {exchange_prices_set - local_prices}"
-            # )
 
         logging.info(f"Reconciliation completed.")
         logging.debug(f"Reconciliation completed. Active orders: {len(local_orders)}")
@@ -801,8 +828,8 @@ def run_grid_trading_bot(AMOUNT):
                       
             logging.info("Recalculating grid prices to process executed orders and replenish the grid.")
 
-            logging.info(f"Adjusted Buy prices: {buy_prices}")
-            logging.info(f"Adjusted Sell prices: {sell_prices}")
+            logging.info(f"Adjusted Buy prices due to filled orders: {buy_prices}")
+            logging.info(f"Adjusted Sell prices due to filled orders: {sell_prices}")
 
             # Επεξεργασία παραγγελιών που εκτελέστηκαν
             for filled_price in filled_orders:
@@ -997,10 +1024,21 @@ def run_grid_trading_bot(AMOUNT):
 
 if __name__ == "__main__":
     try:
-        if is_paused():
-            logging.warning("Pause flag detected. Skipping this cycle...")
-        else:
-            run_grid_trading_bot(AMOUNT)
+        max_retries = 5  # Μέγιστος αριθμός προσπαθειών
+        retries = 0
+
+        while is_paused():
+            if retries >= max_retries:
+                logging.error("Pause flag remains active after multiple retries. Exiting to avoid infinite loop.")
+                raise RuntimeError("Maximum retries exceeded while waiting for pause flag to clear.")
+            
+            logging.warning(f"Pause flag detected. Retrying in 1 minute... (Attempt {retries + 1}/{max_retries})")
+            retries += 1
+            time.sleep(60)  # Αναμονή ενός λεπτού
+
+        # Αν το pause flag δεν είναι ενεργό, εκτέλεση του bot
+        run_grid_trading_bot(AMOUNT)
+
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}", exc_info=True)
         print("An error occurred. Check the logs for more details.")
