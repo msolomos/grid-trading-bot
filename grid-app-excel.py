@@ -5,11 +5,49 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# Configuration
-ORDERS_FILE = "/opt/python/grid-trading-bot/open_orders.json"
-PAIR = "XRP/USDT"
-EXCHANGE_NAME = "binance"
+
+# Configuration files
 CONFIG_FILE = "/opt/python/grid-trading-bot/config.json"
+ORDERS_FILE = "/opt/python/grid-trading-bot/open_orders.json"
+
+
+#################################################################################################################################################################################################
+
+# Φόρτωση μεταβλητών απο αρχείο ρυθμίσεων
+def load_pair_and_exchange():
+    """Load PAIR and EXCHANGE_NAME from the JSON configuration file."""
+    try:
+        with open(CONFIG_FILE, "r") as file:
+            keys = json.load(file)
+            
+            # Ανάγνωση της ενότητας GRID_CONFIG
+            grid_config = keys.get("GRID_CONFIG", {})
+            pair = grid_config.get("SYMBOL")
+            exchange_name = grid_config.get("EXCHANGE_NAME")
+            
+            # Έλεγχος για κενές τιμές
+            if not pair or not exchange_name:
+                missing_keys = []
+                if not pair:
+                    missing_keys.append("SYMBOL")
+                if not exchange_name:
+                    missing_keys.append("EXCHANGE_NAME")
+                raise ValueError(f"Missing keys in the JSON file: {', '.join(missing_keys)}")
+
+            return pair, exchange_name
+    except FileNotFoundError:
+        raise FileNotFoundError(f"The specified JSON file '{CONFIG_FILE}' was not found.")
+    except json.JSONDecodeError:
+        raise ValueError(f"The JSON file '{CONFIG_FILE}' is not properly formatted.")
+
+
+
+# Φόρτωση PAIR και EXCHANGE_NAME
+PAIR, EXCHANGE_NAME = load_pair_and_exchange()        
+        
+        
+
+
 
 # Σύνδεση με το exchange μέσω ccxt
 def initialize_exchange():
