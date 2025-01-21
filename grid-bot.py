@@ -24,41 +24,23 @@ logging.basicConfig(
 
 
 # 1. ---------------------- Static / Global configuration ----------------------
-ENABLE_DEMO_MODE = False  # Toggle for mockup data during testing
-mock_order_counter = 0
-
-# Configuration parameters
-EXCHANGE_NAME = 'binance'
-SYMBOL = 'XRP/USDT'
-OPEN_ORDERS_FILE = '/opt/python/grid-trading-bot/open_orders.json'
-CRYPTO_SYMBOL = 'XRP'
-CRYPTO_CURRENCY = 'USDT'
-
-
-
-# Number of grid levels
-GRID_SIZE = 0.043
-# AMOUNT of pair per order
-AMOUNT = 50
-# Number of grids above and below current price
-GRID_COUNT = 10
-MAX_ORDERS = 20
-
-# Στατική μεταβλητή για τη διαδρομή του JSON αρχείου
+# Διαδρομές αρχείων συστήματος
 JSON_PATH = "/opt/python/grid-trading-bot/config.json"
 PAUSE_FLAG_PATH = "/opt/python/grid-trading-bot/pause.flag"
-
+OPEN_ORDERS_FILE = '/opt/python/grid-trading-bot/open_orders.json'
 
 # Παράμετροι Αποστολής E-mail
 ENABLE_EMAIL_NOTIFICATIONS = True
 ENABLE_PUSH_NOTIFICATIONS = True
 
-
+# Ενεργοποίηση demo mode
+ENABLE_DEMO_MODE = False  # Toggle for mockup data during testing
+mock_order_counter = 0
 
 
 # 2. ---------------------- Load Keys from external file ----------------------
 def load_keys():
-    """Load API credentials and notification settings from a JSON file."""
+    """Load API credentials, notification settings, and grid configuration from a JSON file."""
     try:
         with open(JSON_PATH, "r") as file:
             keys = json.load(file)
@@ -74,6 +56,17 @@ def load_keys():
             email_sender = keys.get("EMAIL_SENDER")
             email_recipient = keys.get("EMAIL_RECIPIENT")
 
+            # Ρυθμίσεις Grid Configuration
+            grid_config = keys.get("GRID_CONFIG", {})
+            exchange_name = grid_config.get("EXCHANGE_NAME")
+            symbol = grid_config.get("SYMBOL")
+            crypto_symbol = grid_config.get("CRYPTO_SYMBOL")
+            crypto_currency = grid_config.get("CRYPTO_CURRENCY")
+            grid_size = grid_config.get("GRID_SIZE")
+            amount = grid_config.get("AMOUNT")
+            grid_count = grid_config.get("GRID_COUNT")
+            max_orders = grid_config.get("MAX_ORDERS")
+            
             # Έλεγχος για κενές τιμές
             missing_keys = []
             if not api_key or not api_secret:
@@ -88,11 +81,16 @@ def load_keys():
                 missing_keys.append("EMAIL_SENDER")
             if not email_recipient:
                 missing_keys.append("EMAIL_RECIPIENT")
+            if not exchange_name or not symbol or not crypto_symbol or not crypto_currency:
+                missing_keys.extend(["EXCHANGE_NAME", "SYMBOL", "CRYPTO_SYMBOL", "CRYPTO_CURRENCY"])
+            if grid_size is None or amount is None or grid_count is None or max_orders is None:
+                missing_keys.extend(["GRID_SIZE", "AMOUNT", "GRID_COUNT", "MAX_ORDERS"])
             
             if missing_keys:
                 raise ValueError(f"Missing keys in the JSON file: {', '.join(missing_keys)}")
 
-            return api_key, api_secret, sendgrid_api_key, pushover_token, pushover_user, email_sender, email_recipient
+            return (api_key, api_secret, sendgrid_api_key, pushover_token, pushover_user, email_sender, email_recipient,
+                    exchange_name, symbol, crypto_symbol, crypto_currency, grid_size, amount, grid_count, max_orders)
     except FileNotFoundError:
         raise FileNotFoundError(f"The specified JSON file '{JSON_PATH}' was not found.")
     except json.JSONDecodeError:
@@ -101,8 +99,11 @@ def load_keys():
 
 
 
-# Load API_KEY and API_SECRET from the JSON file
-API_KEY, API_SECRET, SENDGRID_API_KEY, PUSHOVER_TOKEN, PUSHOVER_USER, EMAIL_SENDER, EMAIL_RECIPIENT = load_keys()
+
+# Load configuration from the JSON file
+(API_KEY, API_SECRET, SENDGRID_API_KEY, PUSHOVER_TOKEN, PUSHOVER_USER, EMAIL_SENDER, EMAIL_RECIPIENT,
+ EXCHANGE_NAME, SYMBOL, CRYPTO_SYMBOL, CRYPTO_CURRENCY, GRID_SIZE, AMOUNT, GRID_COUNT, MAX_ORDERS) = load_keys()
+
              
 
 
@@ -209,7 +210,7 @@ def initialize_exchange():
         # Testnet ή Production
         exchange.set_sandbox_mode(False)
         exchange.load_markets()  # <--- load markets for safety
-        logging.info(f"Connected to {EXCHANGE_NAME} - Markets loaded: {len(exchange.markets)}")
+        
         return exchange
     except Exception as e:
         logging.error(f"Failed to connect to {EXCHANGE_NAME}: {e}")
@@ -741,18 +742,21 @@ def run_grid_trading_bot(AMOUNT):
     logging.info(f"Starting {SYMBOL} Grid Trading bot...")
     iteration_start = time.time()
 
+    # Φόρτωση αρχείο ρυθμίσεων
+    logging.info(f"Loaded configuratio file from config file {JSON_PATH}.")
+    
     # Αρχικοποίηση exchange
-    exchange = initialize_exchange()
+    exchange = initialize_exchange()  
+    logging.info(f"Connected to {EXCHANGE_NAME} - Markets loaded: {len(exchange.markets)}")
     
     # Φόρτωση παραγγελιών και στατιστικών από το αρχείο
     open_orders, statistics = load_or_fetch_open_orders(exchange, SYMBOL, OPEN_ORDERS_FILE)
  
     # Διασφάλιση consistency στα open_orders
     open_orders = {float(k): v for k, v in open_orders.items()}  # Τιμές σε float
-    
-    
+        
     # Logging αρχικών τιμών
-    logging.info(f"Loaded statistics: {statistics}")
+    logging.info(f"Loaded statistics: {{ {', '.join(f'{key}: {round(value, 2) if isinstance(value, (int, float)) else value}' for key, value in statistics.items())} }}")
     logging.debug(f"Loaded open orders: {open_orders}")
     
 
@@ -1039,7 +1043,7 @@ def run_grid_trading_bot(AMOUNT):
         # Αποθήκευση ενημερωμένων δεδομένων
         save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders, statistics, silent=True)
         
-        logging.info(f"Saved open orders (including canceled) and statistics to {OPEN_ORDERS_FILE}.")
+        logging.info(f"Saved open orders (including canceled) and statistics to orders file {OPEN_ORDERS_FILE}.")
        
         # Μετά την ολοκλήρωση του iteration
         iteration_end = time.time()
