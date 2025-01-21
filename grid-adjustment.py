@@ -7,14 +7,7 @@ from datetime import datetime
 import pushover
 
 # Configuration
-EXCHANGE_NAME = 'binance'
-SYMBOL = 'XRP/USDT'
-BASE_CURRENCY = 'XRP'
-QUOTE_CURRENCY = 'USDT'
-GRID_SIZE = 0.043
-AMOUNT = 50
-GRID_COUNT = 10
-MAX_ORDERS = GRID_COUNT * 2
+# Διαδρομές αρχείων συστήματος
 OPEN_ORDERS_FILE = "/opt/python/grid-trading-bot/open_orders.json"
 JSON_PATH = "/opt/python/grid-trading-bot/config.json"
 PAUSE_FLAG_PATH = "/opt/python/grid-trading-bot/pause.flag"
@@ -22,7 +15,6 @@ PAUSE_FLAG_PATH = "/opt/python/grid-trading-bot/pause.flag"
 # Για το function cancel_orders_outside_range
 MAX_RETRIES = 5
 RETRY_DELAY_SECONDS = 2
-
 
 # Παράμετροι Αποστολής E-mail
 ENABLE_EMAIL_NOTIFICATIONS = True
@@ -40,23 +32,34 @@ logging.basicConfig(
 
 # Load API keys
 def load_keys():
-    """Load API credentials and notification settings from a JSON file."""
+    """Load API credentials, notification settings, and grid configuration from a JSON file."""
     try:
         with open(JSON_PATH, "r") as file:
             keys = json.load(file)
-
-            # Required API keys
+            
+            # Απαραίτητα κλειδιά για το API
             api_key = keys.get("API_KEY")
             api_secret = keys.get("API_SECRET")
-
-            # Notification keys
+            
+            # Κλειδιά για ειδοποιήσεις
             sendgrid_api_key = keys.get("SENDGRID_API_KEY")
             pushover_token = keys.get("PUSHOVER_TOKEN")
             pushover_user = keys.get("PUSHOVER_USER")
             email_sender = keys.get("EMAIL_SENDER")
             email_recipient = keys.get("EMAIL_RECIPIENT")
 
-            # Check for missing keys
+            # Ρυθμίσεις Grid Configuration
+            grid_config = keys.get("GRID_CONFIG", {})
+            exchange_name = grid_config.get("EXCHANGE_NAME")
+            symbol = grid_config.get("SYMBOL")
+            crypto_symbol = grid_config.get("CRYPTO_SYMBOL")
+            crypto_currency = grid_config.get("CRYPTO_CURRENCY")
+            grid_size = grid_config.get("GRID_SIZE")
+            amount = grid_config.get("AMOUNT")
+            grid_count = grid_config.get("GRID_COUNT")
+            max_orders = grid_config.get("MAX_ORDERS")
+            
+            # Έλεγχος για κενές τιμές
             missing_keys = []
             if not api_key or not api_secret:
                 missing_keys.extend(["API_KEY", "API_SECRET"])
@@ -70,19 +73,25 @@ def load_keys():
                 missing_keys.append("EMAIL_SENDER")
             if not email_recipient:
                 missing_keys.append("EMAIL_RECIPIENT")
-
+            if not exchange_name or not symbol or not crypto_symbol or not crypto_currency:
+                missing_keys.extend(["EXCHANGE_NAME", "SYMBOL", "CRYPTO_SYMBOL", "CRYPTO_CURRENCY"])
+            if grid_size is None or amount is None or grid_count is None or max_orders is None:
+                missing_keys.extend(["GRID_SIZE", "AMOUNT", "GRID_COUNT", "MAX_ORDERS"])
+            
             if missing_keys:
                 raise ValueError(f"Missing keys in the JSON file: {', '.join(missing_keys)}")
 
-            return api_key, api_secret, sendgrid_api_key, pushover_token, pushover_user, email_sender, email_recipient
+            return (api_key, api_secret, sendgrid_api_key, pushover_token, pushover_user, email_sender, email_recipient,
+                    exchange_name, symbol, crypto_symbol, crypto_currency, grid_size, amount, grid_count, max_orders)
     except FileNotFoundError:
         raise FileNotFoundError(f"The specified JSON file '{JSON_PATH}' was not found.")
     except json.JSONDecodeError:
         raise ValueError(f"The JSON file '{JSON_PATH}' is not properly formatted.")
       
 
-# Load API_KEY and API_SECRET from the JSON file
-API_KEY, API_SECRET, SENDGRID_API_KEY, PUSHOVER_TOKEN, PUSHOVER_USER, EMAIL_SENDER, EMAIL_RECIPIENT = load_keys()
+# Load configuration from the JSON file
+(API_KEY, API_SECRET, SENDGRID_API_KEY, PUSHOVER_TOKEN, PUSHOVER_USER, EMAIL_SENDER, EMAIL_RECIPIENT,
+ EXCHANGE_NAME, SYMBOL, CRYPTO_SYMBOL, CRYPTO_CURRENCY, GRID_SIZE, AMOUNT, GRID_COUNT, MAX_ORDERS) = load_keys()
 
 
 
@@ -272,10 +281,31 @@ def place_new_orders(exchange, grid_levels, existing_prices, max_orders):
 # Save orders to file
 def save_open_orders_to_file(file_path, open_orders, statistics=None, silent=False):
     try:
+        # Αρχικοποίηση στατιστικών αν είναι None
+        if statistics is None:
+            statistics = {
+                "total_buys": 0,
+                "total_sells": 0,
+                "net_profit": 0.0
+            }
+
+        # Υπολογισμός στατιστικών
+        for _, order in open_orders.items():
+            side = order.get('side')
+            price = float(order.get('price', 0))
+            amount = float(order.get('amount', 0))
+            if side == 'buy':
+                statistics["total_buys"] += 1
+                statistics["net_profit"] -= price * amount  # Αφαιρούμε το κόστος αγοράς
+            elif side == 'sell':
+                statistics["total_sells"] += 1
+                statistics["net_profit"] += price * amount  # Προσθέτουμε τα έσοδα από την πώληση
+
+        # Επεξεργασία των εντολών για αποθήκευση
         orders_to_save = {}
-        for _, order in open_orders.items():  # Αλλάξαμε το key loop από price σε _
+        for _, order in open_orders.items():
             try:
-                orders_to_save[str(order.get('price'))] = {  # Χρησιμοποιούμε το price ως κλειδί
+                orders_to_save[str(order.get('price'))] = {
                     'id': order.get('id'),
                     'symbol': order.get('symbol'),
                     'price': order.get('price'),
@@ -290,15 +320,13 @@ def save_open_orders_to_file(file_path, open_orders, statistics=None, silent=Fal
                 logging.error(f"Error serializing order with ID {order.get('id')}: {e}. Order: {order}")
                 continue
 
+        # Δεδομένα προς αποθήκευση
         data_to_save = {
             "orders": orders_to_save,
-            "statistics": statistics if statistics else {
-                "total_buys": 0,
-                "total_sells": 0,
-                "net_profit": 0.0
-            }
+            "statistics": statistics
         }
 
+        # Αποθήκευση στο αρχείο
         temp_file_path = file_path + ".tmp"
         with open(temp_file_path, 'w') as f:
             json.dump(data_to_save, f, indent=4)
@@ -308,6 +336,7 @@ def save_open_orders_to_file(file_path, open_orders, statistics=None, silent=Fal
             logging.info(f"Saved open orders and statistics to {file_path}")
     except Exception as e:
         logging.error(f"Failed to save open orders and statistics to file: {e}")
+
 
 
 
@@ -328,7 +357,7 @@ def fetch_and_initialize_exchange():
     ticker = exchange.fetch_ticker(SYMBOL)
     current_price = ticker['last']
     
-    logging.info(f"Current price: {current_price} {QUOTE_CURRENCY}")
+    logging.info(f"Current price: {current_price} {CRYPTO_CURRENCY}")
     return exchange, current_price
 
 
@@ -420,7 +449,7 @@ def find_orders_out_of_range(open_orders, current_price, buy_orders, sell_orders
 
 
 
-def process_canceled_orders(exchange, canceled_orders, all_orders, current_price, new_buy_orders, new_sell_orders):
+def process_canceled_orders(exchange, canceled_orders, all_orders, current_price, new_buy_orders, new_sell_orders, statistics):
     """
     Επεξεργάζεται τις ακυρωμένες παραγγελίες, αντικαθιστά τις θέσεις τους και ανανεώνει το αρχείο παραγγελιών.
     """
@@ -455,6 +484,8 @@ def process_canceled_orders(exchange, canceled_orders, all_orders, current_price
             if order_details['side'] == 'buy':
                 price = round(current_price - GRID_SIZE * (len(new_buy_orders) + 1), 4)
                 logging.info(f"Preparing to place new buy order at price: {price}")
+                statistics["total_buys"] -= 1
+                statistics["net_profit"] += float(order_details['price']) * float(order_details['amount'])
                 try:
                     new_order = exchange.create_limit_buy_order(SYMBOL, AMOUNT, price)
                     if isinstance(new_order, dict) and 'id' in new_order and 'price' in new_order:
@@ -480,6 +511,8 @@ def process_canceled_orders(exchange, canceled_orders, all_orders, current_price
             elif order_details['side'] == 'sell':
                 price = round(current_price + GRID_SIZE * (len(new_sell_orders) + 1), 4)
                 logging.info(f"Preparing to place new sell order at price: {price}")
+                statistics["total_sells"] -= 1
+                statistics["net_profit"] -= float(order_details['price']) * float(order_details['amount'])                
                 try:
                     new_order = exchange.create_limit_sell_order(SYMBOL, AMOUNT, price)
                     if isinstance(new_order, dict) and 'id' in new_order and 'price' in new_order:
@@ -566,15 +599,15 @@ def maintain_order_balance(exchange, current_price, buy_orders, sell_orders, new
             try:
                 # Έλεγχος διαθέσιμου balance
                 balance = exchange.fetch_balance()
-                required_amount = price * AMOUNT  # Το ποσό που απαιτείται στο QUOTE_CURRENCY
-                if balance['free'][QUOTE_CURRENCY] < required_amount:
+                required_amount = price * AMOUNT  # Το ποσό που απαιτείται στο CRYPTO_CURRENCY
+                if balance['free'][CRYPTO_CURRENCY] < required_amount:
                     logging.warning(
-                        f"Insufficient balance ({balance['free'][QUOTE_CURRENCY]:.4f} {QUOTE_CURRENCY}) "
-                        f"to place order at price {price:.4f} (requires {required_amount:.4f} {QUOTE_CURRENCY})."
+                        f"Insufficient balance ({balance['free'][CRYPTO_CURRENCY]:.4f} {CRYPTO_CURRENCY}) "
+                        f"to place order at price {price:.4f} (requires {required_amount:.4f} {CRYPTO_CURRENCY})."
                     )
                     send_push_notification(
-                        f"Insufficient balance ({balance['free'][QUOTE_CURRENCY]:.4f} {QUOTE_CURRENCY}) "
-                        f"to place order at price {price:.4f} (requires {required_amount:.4f} {QUOTE_CURRENCY})."
+                        f"Insufficient balance ({balance['free'][CRYPTO_CURRENCY]:.4f} {CRYPTO_CURRENCY}) "
+                        f"to place order at price {price:.4f} (requires {required_amount:.4f} {CRYPTO_CURRENCY})."
                     )
                     return  # Σταματάει τη διαδικασία ή επιστρέφει στο ανώτερο επίπεδο (αναλόγως την ανάγκη σας)
                 
@@ -614,14 +647,14 @@ def maintain_order_balance(exchange, current_price, buy_orders, sell_orders, new
             try:
                 # Έλεγχος διαθέσιμου balance
                 balance = exchange.fetch_balance()
-                if balance['free'][BASE_CURRENCY] < AMOUNT:  # Ελέγχουμε το BASE_CURRENCY
+                if balance['free'][CRYPTO_SYMBOL] < AMOUNT:  # Ελέγχουμε το CRYPTO_SYMBOL
                     logging.warning(
-                        f"Insufficient balance ({balance['free'][BASE_CURRENCY]:.4f} {BASE_CURRENCY}) "
-                        f"to place sell order for {AMOUNT:.4f} {BASE_CURRENCY} at price {price:.4f}."
+                        f"Insufficient balance ({balance['free'][CRYPTO_SYMBOL]:.4f} {CRYPTO_SYMBOL}) "
+                        f"to place sell order for {AMOUNT:.4f} {CRYPTO_SYMBOL} at price {price:.4f}."
                     )
                     send_push_notification(
-                        f"Insufficient balance ({balance['free'][BASE_CURRENCY]:.4f} {BASE_CURRENCY}) "
-                        f"to place sell order for {AMOUNT:.4f} {BASE_CURRENCY} at price {price:.4f}."
+                        f"Insufficient balance ({balance['free'][CRYPTO_SYMBOL]:.4f} {CRYPTO_SYMBOL}) "
+                        f"to place sell order for {AMOUNT:.4f} {CRYPTO_SYMBOL} at price {price:.4f}."
                     )
                     return  # Σταματάει τη διαδικασία ή επιστρέφει στο ανώτερο επίπεδο (αναλόγως την ανάγκη σας)
                 
@@ -720,6 +753,7 @@ def handle_excess_orders(exchange, buy_orders, sell_orders, current_price):
 # η κεντρική σου συνάρτηση
 def adjust_grid_range():
     try:
+        statistics = {"total_buys": 0, "total_sells": 0, "net_profit": 0.0}
         logging.info(f">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
         logging.info(f"Starting {SYMBOL} Grid Trading bot (grid range worker)...")
         
@@ -767,15 +801,13 @@ def adjust_grid_range():
                 # Μετατροπή λίστας σε dictionary χρησιμοποιώντας την τιμή ως κλειδί
                 open_orders = {order['price']: order for order in open_orders}
             
-            #save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders)
-            #logging.info(f"Updated open orders file after cancellation.")
-
             
             # Επεξεργασία canceled orders & δημιουργία νέων (buy/sell)
             try:
                 process_canceled_orders(
                     exchange, canceled_orders, open_orders, current_price,
-                    new_buy_orders, new_sell_orders
+                    new_buy_orders, new_sell_orders,
+                    statistics
                 )
 
 
@@ -792,9 +824,6 @@ def adjust_grid_range():
                     open_orders = {order['price']: order for order in open_orders}                
 
 
-                
-                #save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders)
-                #logging.info(f"Updated open orders file after processing canceled orders.")                
                 
             except Exception as e:
                 logging.error(f"Error in new order placement logic: {e}")
@@ -826,7 +855,8 @@ def adjust_grid_range():
             open_orders = {order['price']: order for order in open_orders}
 
         
-        save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders)
+        save_open_orders_to_file(OPEN_ORDERS_FILE, open_orders, statistics=statistics)
+
         
         
         # Μετά την ολοκλήρωση του iteration
