@@ -97,16 +97,37 @@ def get_existing_orders():
     data = load_open_orders()
     orders = []
     for price, order in data["orders"].items():
+        # Αφαίρεση των χιλιοστών του δευτερολέπτου αν υπάρχουν
+        try:
+            dt = order["datetime"]
+            if "." in dt:
+                clean_datetime = dt.split(".")[0] + "Z"  # Αφαιρεί ό,τι υπάρχει μετά την τελεία
+            else:
+                clean_datetime = dt  # Χρησιμοποιεί ολόκληρη τη συμβολοσειρά αν δεν υπάρχει τελεία
+            
+            # Υπολογισμός ημερών ανοιχτού order
+            days_open = (datetime.now() - datetime.strptime(clean_datetime, "%Y-%m-%dT%H:%M:%SZ")).days
+
+        except Exception as e:
+            clean_datetime = "Invalid"
+            days_open = "N/A"  # Εναλλακτική τιμή σε περίπτωση σφάλματος
+
         order_info = {
             "order_id": order["id"],
             "amount": order["amount"],
             "bought_at": order["price"],
             "side": order["side"],
             "status": order["status"],
-            "days_open": (datetime.now() - datetime.strptime(order["datetime"], "%Y-%m-%dT%H:%M:%S.%fZ")).days
+            "days_open": days_open,
+            "datetime": clean_datetime
         }
         orders.append(order_info)
     return jsonify({"orders": orders})
+
+
+
+
+
 
 # Endpoint 3: Sell Threshold Evaluation
 @app.route("/GRID/sell-threshold", methods=["GET"])
