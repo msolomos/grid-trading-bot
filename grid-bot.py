@@ -36,7 +36,7 @@ ENABLE_PUSH_NOTIFICATIONS = True
 # Ενεργοποίηση demo mode
 ENABLE_DEMO_MODE = False  # Toggle for mockup data during testing
 mock_order_counter = 0
-TARGET_BALANCE = 400  # ελάχιστη ισορροπία
+
 
 
 # 2. ---------------------- Load Keys from external file ----------------------
@@ -67,6 +67,7 @@ def load_keys():
             amount = grid_config.get("AMOUNT")
             grid_count = grid_config.get("GRID_COUNT")
             max_orders = grid_config.get("MAX_ORDERS")
+            target_balance = grid_config.get("TARGET_BALANCE")
             
             # Έλεγχος για κενές τιμές
             missing_keys = []
@@ -91,7 +92,7 @@ def load_keys():
                 raise ValueError(f"Missing keys in the JSON file: {', '.join(missing_keys)}")
 
             return (api_key, api_secret, sendgrid_api_key, pushover_token, pushover_user, email_sender, email_recipient,
-                    exchange_name, symbol, crypto_symbol, crypto_currency, grid_size, amount, grid_count, max_orders)
+                    exchange_name, symbol, crypto_symbol, crypto_currency, grid_size, amount, grid_count, max_orders, target_balance)
     except FileNotFoundError:
         raise FileNotFoundError(f"The specified JSON file '{JSON_PATH}' was not found.")
     except json.JSONDecodeError:
@@ -103,7 +104,7 @@ def load_keys():
 
 # Load configuration from the JSON file
 (API_KEY, API_SECRET, SENDGRID_API_KEY, PUSHOVER_TOKEN, PUSHOVER_USER, EMAIL_SENDER, EMAIL_RECIPIENT,
- EXCHANGE_NAME, SYMBOL, CRYPTO_SYMBOL, CRYPTO_CURRENCY, GRID_SIZE, AMOUNT, GRID_COUNT, MAX_ORDERS) = load_keys()
+ EXCHANGE_NAME, SYMBOL, CRYPTO_SYMBOL, CRYPTO_CURRENCY, GRID_SIZE, AMOUNT, GRID_COUNT, MAX_ORDERS, TARGET_BALANCE) = load_keys()
 
              
 
