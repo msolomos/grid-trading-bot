@@ -1,55 +1,40 @@
 # Grid Trading Bot Suite
 
-This repository contains two key components for automated grid trading on cryptocurrency exchanges:
-1. **Main Grid Trading Bot** - Executes grid trading strategies by placing buy and sell orders dynamically.
-2. **Grid Range Adjustment Bot** - Manages the range of the grid, adjusts open orders, and maintains balance in the grid.
-
-Both bots utilize the [CCXT](https://github.com/ccxt/ccxt) library for exchange integration and support advanced features like logging, notifications, and error handling.
+## Overview
+The Grid Trading Bot Suite consists of two Python-based tools designed to automate grid trading strategies for cryptocurrencies. These tools integrate with exchanges via the CCXT library, support advanced configurations, and offer detailed logging and notifications for seamless operation.
 
 ---
 
 ## Features
 
-### 1. Main Grid Trading Bot
+### 1. **Main Grid Trading Bot**
+- Implements a grid trading strategy:
+  - Dynamically places buy and sell orders based on a predefined grid structure.
+  - Adjusts the grid dynamically to market conditions.
+  - Tracks metrics such as total buys, sells, and net profit.
+- Synchronizes local orders with exchange orders.
+- Supports demo mode for safe testing.
 
-#### Core Features:
-- **Dynamic Grid Management**: Automatically calculates and places buy/sell orders based on configurable grid parameters (`GRID_SIZE`, `GRID_COUNT`).
-- **Balance Management**: Ensures sufficient balances for both base and quote currencies.
-- **Order Synchronization**: Keeps local open orders in sync with the exchange.
-- **Profit Calculation**: Tracks net profit from executed trades.
-- **Notifications**: Sends alerts via email and Pushover for significant events like filled orders or errors.
-- **Demo Mode**: Allows safe testing without placing real orders on the exchange.
+### 2. **Grid Range Adjustment Bot**
+- Automatically adjusts the grid range based on the current price:
+  - Cancels orders outside the configured grid range.
+  - Places new buy and sell orders to replenish the grid.
+  - Maintains balance between buy and sell orders.
+- Handles excess orders to respect the maximum allowed orders.
 
-#### Key Parameters:
-- `GRID_SIZE`: Price gap between consecutive grid orders.
-- `GRID_COUNT`: Number of grid levels.
-- `MAX_ORDERS`: Maximum open orders allowed.
-- `TARGET_BALANCE`: Minimum balance to maintain.
+### 3. **Notifications**
+- Push notifications via Pushover.
+- Email notifications via SendGrid.
 
----
-
-### 2. Grid Range Adjustment Bot
-
-#### Core Features:
-- **Grid Adjustment**: Dynamically adjusts the grid based on the current market price.
-- **Order Filtering**: Identifies and cancels orders outside the configured grid range.
-- **Excess Order Management**: Ensures the number of open orders does not exceed the `MAX_ORDERS` limit.
-- **Order Placement**: Places new buy and sell orders to replenish the grid after cancellations.
-- **Balance Maintenance**: Maintains a balance between buy and sell orders within the grid.
-- **Pause Flag**: Safely pauses operations for critical adjustments.
-
-#### Process Workflow:
-1. **Fetch Current Market Data**: Retrieves the current price and open orders from the exchange.
-2. **Filter Out-of-Range Orders**: Identifies orders that are outside the grid range and cancels them.
-3. **Replenish Orders**: Places new orders to maintain the grid's integrity.
-4. **Balance Validation**: Ensures the balance between buy and sell orders.
-5. **Handle Excess Orders**: Cancels orders if the total count exceeds `MAX_ORDERS`.
+### 4. **Logging**
+- Detailed logs for all operations, including grid adjustments and order management.
+- Logs are saved to files and displayed in the console.
 
 ---
 
 ## Configuration
 
-Both bots require a configuration file (`config.json`) with the following structure:
+The bots use a `config.json` file for settings. Example configuration:
 
 ```json
 {
@@ -72,45 +57,104 @@ Both bots require a configuration file (`config.json`) with the following struct
         "TARGET_BALANCE": 100
     }
 }
+```
 
-````
+### Key Parameters
+- **`GRID_SIZE`**: Price gap between grid levels.
+- **`GRID_COUNT`**: Number of grid levels for buys and sells.
+- **`MAX_ORDERS`**: Maximum number of active orders.
+- **`TARGET_BALANCE`**: Minimum balance for both currencies.
+
+---
 
 ## Usage
+
+### 1. **Setup**
+1. Clone the repository.
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Place your `config.json` file in the root directory.
+
+### 2. **Run the Bots**
 #### Main Grid Trading Bot
-
-1. Place your config.json file in the bot's root directory.
-2. Run the bot:
-
-```
+```bash
 python grid_trading_bot.py
 ```
 
-#### Logging
-
-Logs are saved in the following files:
-
-```
-# Logs for the Main Bot
-grid_trading_bot.log
-
-# Logs for the Grid Adjustment Bot
-grid_adjustment.log
+#### Grid Range Adjustment Bot
+```bash
+python grid_range_adjustment.py
 ```
 
-#### Prerequisites
+### 3. **Logging and Monitoring**
+- **Main Bot Logs**: `grid_trading_bot.log`
+- **Grid Adjustment Bot Logs**: `grid_adjustment.log`
+
+---
+
+## Key Functions
+
+### Main Grid Trading Bot
+- **Order Placement**: Dynamically calculates and places grid orders.
+- **Reconciliation**: Synchronizes local orders with the exchange.
+- **Balance Management**: Ensures sufficient funds for trading.
+- **Profit Tracking**: Logs net profits and completed trades.
+
+### Grid Range Adjustment Bot
+- **Range Adjustments**: Cancels out-of-range orders and places new ones.
+- **Balance Maintenance**: Ensures balanced buy and sell orders.
+- **Excess Order Handling**: Cancels excess orders to respect limits.
+
+---
+
+## File Structure
 ```
-# Python version
-Python 3.8 or higher
-
-# Install dependencies
-pip install ccxt pushover
+.
+├── grid_trading_bot.py          # Main bot script
+├── grid_range_adjustment.py     # Grid adjustment bot
+├── config.json                  # Configuration file
+├── open_orders.json             # Tracks active orders
+├── requirements.txt             # Python dependencies
+├── grid_trading_bot.log         # Main bot logs
+├── grid_adjustment.log          # Adjustment bot logs
 ```
 
-#### Notes
+---
 
-1. Ensure you have sufficient funds in your exchange account to execute the grid strategy.
-2. Use demo mode to test the strategy without affecting your real funds.
+## Requirements
 
-#### Contribution
+- **Python 3.8+**
+- **Libraries**:
+  - ccxt
+  - pushover
+  - sendgrid
 
-Feel free to open an issue or submit a pull request for feature suggestions or bug fixes.
+Install all dependencies with:
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## Notes
+- Ensure your API keys are stored securely.
+- Test the bots in demo mode before using them with real funds.
+- Regularly monitor their operations.
+
+---
+
+## License
+This project is open-source and available under the [MIT License](LICENSE).
+
+---
+
+## Contributions
+Contributions are welcome! Whether it's improving code efficiency, adding features, or fixing bugs, your input is valuable. Feel free to submit issues or pull requests.
+
+---
+
+## Disclaimer
+These bots are provided for educational purposes only. Use them at your own risk. The creators are not responsible for financial losses incurred.
+
