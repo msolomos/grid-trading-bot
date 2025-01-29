@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from sendgrid import SendGridAPIClient
+from collections import defaultdict 
 from sendgrid.helpers.mail import Mail
 import ccxt
 import time
@@ -612,17 +613,45 @@ def fetch_filled_orders_from_exchange(exchange, symbol, since=None,days_ago=1, l
     :return: Λίστα παραγγελιών που έχουν ολοκληρωθεί.
     """
     try:
-        # Υπολογισμός timestamp για το διάστημα που ψάχνουμε
-        since_timestamp = int((datetime.now() - timedelta(days=days_ago)).timestamp() * 1000)        
-        
-        # Φέρνει το ιστορικό παραγγελιών
-        all_orders = exchange.fetch_orders(symbol, since=since_timestamp, limit=limit)
-        filled_orders = [order for order in all_orders if order['status'] == 'closed']
-        logging.info(f"Successfully fetched {len(filled_orders)} filled orders for {symbol}.")
-        return filled_orders
+        since_timestamp = int((datetime.now() - timedelta(days=days_ago)).timestamp() * 1000)
+
+        # Φέρνουμε όλες τις filled orders μέσω fetch_my_trades() (το σωστό API της Binance)
+        trades = exchange.fetch_my_trades(symbol, since=None, limit=limit) or []
+
+        # Φιλτράρουμε τις συναλλαγές του τελευταίου X ημερών
+        filtered_trades = [trade for trade in trades if trade['timestamp'] >= since_timestamp]
+
+        # Ομαδοποίηση των trades με βάση το `order_id`
+        grouped_orders = defaultdict(lambda: {'id': None, 'status': 'closed', 'amount': 0, 'price': 0, 'timestamp': None})
+
+        for trade in filtered_trades:
+            order_id = trade.get('order')
+            price = trade.get('price')
+            amount = trade.get('amount')
+            timestamp = trade.get('timestamp')
+
+            if order_id:
+                grouped_orders[order_id]['id'] = order_id
+                grouped_orders[order_id]['amount'] += amount
+                grouped_orders[order_id]['timestamp'] = timestamp  # Κρατάμε το timestamp της τελευταίας εκτέλεσης
+
+                # Υπολογισμός μέσης τιμής (σταθμισμένος μέσος όρος)
+                previous_total = grouped_orders[order_id]['amount'] - amount
+                if previous_total > 0:
+                    grouped_orders[order_id]['price'] = (grouped_orders[order_id]['price'] * previous_total + price * amount) / (previous_total + amount)
+                else:
+                    grouped_orders[order_id]['price'] = price
+
+        # Μετατροπή σε λίστα για επιστροφή
+        filled_orders = list(grouped_orders.values())
+
+        logging.info(f"Successfully fetched {len(filled_orders)} unique filled orders for {symbol}.")
+
+        return filled_orders  # ✅ Η επιστροφή παραμένει όπως ήταν για τη reconcile
+
     except Exception as e:
         logging.error(f"Failed to fetch filled orders: {e}")
-        raise
+        return []  # ✅ Αν υπάρξει σφάλμα, επιστρέφουμε κενή λίστα
 
 
 
@@ -716,115 +745,85 @@ def find_order_by_id(canceled_orders, search_id):
 
 
 
-
-def balance_currencies(exchange, symbol, min_balance, min_precision=1, tolerance=5):
+def balance_currencies(exchange, symbol, target_balance, min_precision=1, tolerance=5, fee_buffer=0.001):
     """
-    Διασφαλίζει τουλάχιστον το ελάχιστο υπόλοιπο (min_balance) και στα δύο νομίσματα,
-    με ανοχή (tolerance) και αποφεύγει εντολές με ποσότητα μικρότερη από το min_precision.
-    Ειδοποιεί μέσω Push αν δεν υπάρχουν επαρκή κεφάλαια.
+    Εκτελεί το rebalance στο XRP/USDT grid bot, λαμβάνοντας υπόψη τα διαθέσιμα κεφάλαια.
 
-    :param exchange: Αντικείμενο ccxt για την Binance.
-    :param symbol: Το ζευγάρι συναλλαγών, π.χ., 'XRP/USDT'.
-    :param min_balance: Το ελάχιστο υπόλοιπο για κάθε νόμισμα.
-    :param min_precision: Το ελάχιστο precision για εντολές (προεπιλογή: 1).
-    :param tolerance: Η αποδεκτή απόκλιση από το min_balance (προεπιλογή: 5).
-    :return: Τα τελικά διαθέσιμα υπόλοιπα.
+    :param exchange: Αντικείμενο ανταλλακτηρίου (π.χ. ccxt.binance)
+    :param symbol: Το ζεύγος νομισμάτων (π.χ. "XRP/USDT")
+    :param target_balance: Στόχος balance (π.χ. 400 XRP και 400 USDT)
+    :param min_precision: Ελάχιστη ακρίβεια δεκαδικών για τις συναλλαγές
+    :param tolerance: Ανοχή διαφοράς στο balance για αποφυγή συνεχών αλλαγών
+    :param fee_buffer: Περιθώριο ασφαλείας για τα fees
     """
-    base_currency, quote_currency = symbol.split('/')
 
-    try:
-        # Λήψη υπολοίπου
-        balance = exchange.fetch_balance()
-        free_base = balance['free'].get(base_currency, 0)  # Διαθέσιμο XRP
-        free_quote = balance['free'].get(quote_currency, 0)  # Διαθέσιμο USDT
+    # Ανάκτηση διαθέσιμου υπολοίπου
+    balance = exchange.fetch_balance()
+    free_base = balance[symbol.split('/')[0]]['free']  # XRP
+    free_quote = balance[symbol.split('/')[1]]['free']  # USDT
 
-        logging.info(f"Initial balances: {base_currency}: {free_base:.2f}, {quote_currency}: {free_quote:.2f}")
-        current_price = get_current_price(exchange)
-        logging.info(f"Current price for {symbol}: {current_price:.4f} {quote_currency}/{base_currency}")
+    current_price = exchange.fetch_ticker(symbol)['last']
 
-        # Έλεγχος ανοχής
-        base_within_tolerance = free_base >= (min_balance - tolerance)
-        quote_within_tolerance = free_quote >= (min_balance - tolerance)
+    logging.info(f"[BALANCE CHECK] XRP: {free_base:.2f}, USDT: {free_quote:.2f}")
+    logging.info(f"[PRICE] Current price for {symbol}: {current_price:.4f} USDT/XRP")
 
-        if base_within_tolerance and quote_within_tolerance:
-            logging.info(f"Balances are within tolerance. No action needed.")
-            return {"base_balance": free_base, "quote_balance": free_quote}
+    # **Υπολογισμός διαφοράς για rebalance**
+    required_xrp = target_balance - free_base
+    required_usdt = target_balance - free_quote
 
-        # Έλεγχος αν δεν υπάρχουν επαρκή κεφάλαια
-        if free_base < min_precision and free_quote < min_balance - tolerance:
+    need_more_xrp = required_xrp > tolerance  # Χρειάζεται αγορά XRP
+    need_more_usdt = required_usdt > tolerance  # Χρειάζεται πώληση XRP για USDT
+
+    logging.info(f"[REQUIRED] Need {required_xrp:.2f} XRP, Need {required_usdt:.2f} USDT")
+    logging.info(f"[NEED CHECK] Need More XRP: {need_more_xrp}, Need More USDT: {need_more_usdt}")
+
+    # **Έλεγχος διαθεσιμότητας πριν το rebalance**
+    if need_more_xrp and free_quote < (required_xrp * current_price):
+        message = (
+            f"Not enough USDT to buy XRP. Available: {free_quote:.2f} USDT, "
+            f"Required: {required_xrp * current_price:.2f} USDT."
+        )
+        logging.warning(f"[INSUFFICIENT FUNDS] {message}")
+        send_push_notification(f"[INSUFFICIENT FUNDS] {message}")
+        return {"base_balance": free_base, "quote_balance": free_quote}
+
+    if need_more_usdt:
+        required_xrp_to_sell = required_usdt / current_price
+        remaining_xrp_after_sell = free_base - required_xrp_to_sell
+
+        if remaining_xrp_after_sell < target_balance:
             message = (
-                f"Insufficient funds to balance {symbol}. "
-                f"Available {base_currency}: {free_base:.2f}, {quote_currency}: {free_quote:.2f}. "
-                f"Cannot achieve target of {min_balance} for both currencies."
+                f"Selling {required_xrp_to_sell:.2f} XRP would drop balance below target of {target_balance} XRP."
             )
-            logging.warning(message)
-            send_push_notification(message)
+            logging.warning(f"[INSUFFICIENT FUNDS] {message}")
+            send_push_notification(f"[INSUFFICIENT FUNDS] {message}")
             return {"base_balance": free_base, "quote_balance": free_quote}
 
-        # Διαχείριση XRP
-        if not base_within_tolerance:
-            required_xrp = min_balance - free_base
-            max_affordable_xrp = free_quote / current_price
-            amount_to_buy = min(required_xrp, max_affordable_xrp)
+    # **Εκτέλεση Rebalance**
+    if need_more_xrp:
+        amount_to_buy = required_xrp
+        cost = amount_to_buy * current_price
 
-            # Έλεγχος για minimum precision
-            if amount_to_buy >= min_precision:
-                cost_usdt = amount_to_buy * current_price
-                logging.info(f"Buying {amount_to_buy:.2f} {base_currency} for {cost_usdt:.2f} {quote_currency}.")
-                order = exchange.create_order(
-                    symbol=symbol,
-                    type='market',
-                    side='buy',
-                    amount=amount_to_buy
-                )
-                logging.info(f"Order executed: {order}")
-                free_base += amount_to_buy
-                free_quote -= cost_usdt
-            else:
-                logging.warning(f"Amount to buy {amount_to_buy:.2f} {base_currency} is below the minimum precision {min_precision}. Skipping.")
+        logging.info(f"[TRADE] Buying {amount_to_buy:.2f} XRP for {cost:.2f} USDT.")
+        order = exchange.create_market_buy_order(symbol, amount_to_buy)
 
-        # Διαχείριση USDT
-        if not quote_within_tolerance:
-            required_usdt = min_balance - free_quote
-            amount_to_sell_xrp = required_usdt / current_price
+        # Ενημέρωση των balances
+        free_base += amount_to_buy
+        free_quote -= cost
 
-            # Έλεγχος για minimum precision
-            if amount_to_sell_xrp >= min_precision:
-                logging.info(f"Selling {amount_to_sell_xrp:.2f} {base_currency} for {required_usdt:.2f} {quote_currency}.")
-                order = exchange.create_order(
-                    symbol=symbol,
-                    type='market',
-                    side='sell',
-                    amount=amount_to_sell_xrp
-                )
-                logging.info(f"Order executed: {order}")
-                free_base -= amount_to_sell_xrp
-                free_quote += required_usdt
-            else:
-                logging.warning(f"Amount to sell {amount_to_sell_xrp:.2f} {base_currency} is below the minimum precision {min_precision}. Skipping.")
+    elif need_more_usdt:
+        amount_to_sell = required_usdt / current_price
 
-        # Τελικό υπόλοιπο
-        updated_balance = exchange.fetch_balance()
-        final_base = updated_balance['free'].get(base_currency, 0)
-        final_quote = updated_balance['free'].get(quote_currency, 0)
+        logging.info(f"[TRADE] Selling {amount_to_sell:.2f} XRP for {required_usdt:.2f} USDT.")
+        order = exchange.create_market_sell_order(symbol, amount_to_sell)
 
-        logging.info(f"Final balances: {base_currency}: {final_base:.2f}, {quote_currency}: {final_quote:.2f}")
-        return {
-            "base_balance": final_base,
-            "quote_balance": final_quote,
-        }
+        # Ενημέρωση των balances
+        free_base -= amount_to_sell
+        free_quote += required_usdt
 
-    except Exception as e:
-        logging.error(f"Failed to balance currencies: {e}")
-        raise
+    logging.info(f"[FINAL BALANCE] XRP: {free_base:.2f}, USDT: {free_quote:.2f}")
 
-
-
-
-
-
-
-
+    return {"base_balance": free_base, "quote_balance": free_quote}
 
 
 
@@ -967,10 +966,12 @@ def run_grid_trading_bot(AMOUNT):
         # Execute trade logic 
         logging.info(f"Executing trade logic for {CRYPTO_SYMBOL}")
        
-
+        
         
         # Έλεγχος κατάστασης παραγγελιών
         filled_orders = check_orders_status(exchange, open_orders, current_price)
+        
+        
         
         # Υπολογισμός δυναμικού grid
         buy_prices = [round(current_price - GRID_SIZE * i, 4) for i in range(1, GRID_COUNT + 1)]
