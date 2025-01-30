@@ -127,6 +127,54 @@ The bots use a `config.json` file for settings. Example configuration:
 
 ---
 
+## 📌 Example Logs
+
+### 📜 Main Grid Trading Bot Log
+```
+2025-01-31 01:30:03,369 INFO Starting XRP/USDT Grid Trading bot...
+2025-01-31 01:30:03,369 INFO Loaded configuratio file from config file /opt/python/grid-trading-bot/config.json.
+2025-01-31 01:30:08,379 INFO Connected to binance - Markets loaded: 3404
+2025-01-31 01:30:08,379 INFO Checking currencies balances...
+2025-01-31 01:30:08,929 INFO [BALANCE CHECK] XRP: 1255.76, USDT: 2450.87
+2025-01-31 01:30:08,929 INFO [PRICE] Current price for XRP/USDT: 3.1510 USDT/XRP
+2025-01-31 01:30:08,929 INFO [REQUIRED] Need -255.76 XRP, Need -1450.87 USDT
+2025-01-31 01:30:08,929 INFO [NEED CHECK] Need More XRP: False, Need More USDT: False
+2025-01-31 01:30:08,929 INFO [FINAL BALANCE] XRP: 1255.76, USDT: 2450.87
+2025-01-31 01:30:08,930 INFO Loaded open orders and statistics from /opt/python/grid-trading-bot/open_orders.json
+2025-01-31 01:30:08,930 INFO Loaded statistics: { total_buys: 10, total_sells: 10, net_profit: 221.09 }
+2025-01-31 01:30:08,930 INFO Reconciling local open orders with Binance...
+2025-01-31 01:30:09,206 INFO Successfully fetched 20 active open orders for XRP/USDT from binance API.
+2025-01-31 01:30:09,484 INFO Successfully fetched 2 unique filled orders for XRP/USDT.
+2025-01-31 01:30:09,484 INFO Reconciliation completed.
+2025-01-31 01:30:09,757 INFO Current price: 3.1509 USDT.
+2025-01-31 01:30:09,757 INFO Executing trade logic for XRP
+2025-01-31 01:30:19,055 INFO Active orders: 20, Canceled orders: 0.
+2025-01-31 01:30:19,055 INFO Filled orders in this iteration: []. Removed orders in this iteration: []. Cancelled orders by bot: [].
+2025-01-31 01:30:19,056 INFO No orders were filled in this iteration.
+2025-01-31 01:30:19,056 INFO Reached maximum open orders limit.
+2025-01-31 01:30:19,056 INFO Grid replenishment skipped to avoid exceeding the defined Grid_count (20) or the available capital.
+2025-01-31 01:30:19,059 INFO Saved open orders (including canceled) and statistics to orders file /opt/python/grid-trading-bot/open_orders.json.
+2025-01-31 01:30:19,060 INFO Bot execution completed in 15.69 seconds.
+```
+
+### 📜 Secondary Grid Adjustment Bot Log
+```
+2025-01-31 01:30:03,677 - INFO - Starting XRP/USDT Grid Trading bot (grid range worker)...
+2025-01-31 01:30:08,604 - INFO - Connected to BINANCE - Markets loaded: 3404
+2025-01-31 01:30:08,873 - INFO - Current price: 3.151 USDT
+2025-01-31 01:30:09,148 - INFO - Fetched 20 open orders from BINANCE.
+2025-01-31 01:30:09,149 - INFO - Buy orders on exchange: [2.7094, 2.7524, 2.7954, 2.8384, 2.9066, 2.9363, 2.9592, 3.0331, 3.095, 3.0986]
+2025-01-31 01:30:09,149 - INFO - Sell orders on exchange: [3.2233, 3.2254, 3.2684, 3.3114, 3.3233, 3.3663, 3.4093, 3.4523, 3.4696, 3.4969]
+2025-01-31 01:30:09,149 - INFO - No orders to cancel.
+2025-01-31 01:30:09,149 - INFO - No grid alteration was made. All orders are within the range.
+2025-01-31 01:30:09,423 - INFO - No new orders will be placed to maintain balance. (20)
+2025-01-31 01:30:09,423 - INFO - No excess orders detected. (20)
+2025-01-31 01:30:09,424 - INFO - Saved open orders and statistics to /opt/python/grid-trading-bot/open_orders.json
+2025-01-31 01:30:09,424 - INFO - Bot execution completed in 5.75 seconds.
+```
+
+---
+
 ## 📌 Requirements
 
 - **Python 3.8+**
