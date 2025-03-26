@@ -14,7 +14,7 @@ import pushover
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,  # Ρύθμιση για εμφάνιση μόνο INFO και πάνω
-    format="%(asctime)s %(levelname)s %(message)s",
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("/opt/python/grid-trading-bot/grid_trading_bot.log"),  # Αρχείο log
         logging.StreamHandler()  # Κονσόλα
