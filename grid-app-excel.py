@@ -8,7 +8,7 @@ app = Flask(__name__)
 
 # Configuration files
 CONFIG_FILE = "/opt/python/grid-trading-bot/config.json"
-ORDERS_FILE = "/opt/python/grid-trading-bot/open_orders.json"
+ORDERS_FILE = "/opt/python/grid-trading-bot/worker_open_orders.json"
 
 
 #################################################################################################################################################################################################
