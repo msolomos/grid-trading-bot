@@ -28,7 +28,7 @@ logging.basicConfig(
 # Διαδρομές αρχείων συστήματος
 JSON_PATH = "/opt/python/grid-trading-bot/config.json"
 PAUSE_FLAG_PATH = "/opt/python/grid-trading-bot/pause.flag"
-OPEN_ORDERS_FILE = '/opt/python/grid-trading-bot/open_orders.json'
+OPEN_ORDERS_FILE = '/opt/python/grid-trading-bot/main_open_orders.json'
 
 # Παράμετροι Αποστολής E-mail
 ENABLE_EMAIL_NOTIFICATIONS = True
@@ -37,6 +37,9 @@ ENABLE_PUSH_NOTIFICATIONS = True
 # Ενεργοποίηση demo mode
 ENABLE_DEMO_MODE = False  # Toggle for mockup data during testing
 mock_order_counter = 0
+
+# Balance Check and adjust
+CHECK_BALANCE = True
 
 
 
@@ -745,7 +748,7 @@ def find_order_by_id(canceled_orders, search_id):
 
 
 
-def balance_currencies(exchange, symbol, target_balance, min_precision=1, tolerance=5, fee_buffer=0.001):
+def balance_currencies(exchange, EXCHANGE_NAME, symbol, target_balance, min_precision=1, tolerance=5, fee_buffer=0.001):
     """
     Εκτελεί το rebalance στο XRP/USDT grid bot, λαμβάνοντας υπόψη τα διαθέσιμα κεφάλαια.
 
@@ -764,24 +767,24 @@ def balance_currencies(exchange, symbol, target_balance, min_precision=1, tolera
 
     current_price = exchange.fetch_ticker(symbol)['last']
 
-    logging.info(f"[BALANCE CHECK] XRP: {free_base:.2f}, USDT: {free_quote:.2f}")
-    logging.info(f"[PRICE] Current price for {symbol}: {current_price:.4f} USDT/XRP")
+    logging.info(f"[BALANCE CHECK] {CRYPTO_SYMBOL}: {free_base:.2f}, {CRYPTO_CURRENCY}: {free_quote:.2f}")
+    logging.info(f"[PRICE] Current price for {symbol}: {current_price:.4f}")
 
     # **Υπολογισμός διαφοράς για rebalance**
     required_xrp = target_balance - free_base
     required_usdt = target_balance - free_quote
 
     need_more_xrp = required_xrp > tolerance  # Χρειάζεται αγορά XRP
-    need_more_usdt = required_usdt > tolerance  # Χρειάζεται πώληση XRP για USDT
+    need_more_usdt = required_usdt > tolerance  # Χρειάζεται πώληση XRP
 
-    logging.info(f"[REQUIRED] Need {required_xrp:.2f} XRP, Need {required_usdt:.2f} USDT")
-    logging.info(f"[NEED CHECK] Need More XRP: {need_more_xrp}, Need More USDT: {need_more_usdt}")
+    logging.info(f"[REQUIRED] Need {required_xrp:.2f} {CRYPTO_SYMBOL}, Need {required_usdt:.2f} {CRYPTO_CURRENCY}")
+    logging.info(f"[NEED CHECK] Need More {CRYPTO_SYMBOL}: {need_more_xrp}, Need More {CRYPTO_CURRENCY}: {need_more_usdt}")
 
     # **Έλεγχος διαθεσιμότητας πριν το rebalance**
     if need_more_xrp and free_quote < (required_xrp * current_price):
         message = (
-            f"Not enough USDT to buy XRP. Available: {free_quote:.2f} USDT, "
-            f"Required: {required_xrp * current_price:.2f} USDT."
+            f"Not enough {CRYPTO_CURRENCY} to buy {CRYPTO_SYMBOL}. Available: {free_quote:.2f} {CRYPTO_CURRENCY}, "
+            f"Required: {required_xrp * current_price:.2f} {CRYPTO_CURRENCY}."
         )
         logging.warning(f"[INSUFFICIENT FUNDS] {message}")
         send_push_notification(f"[INSUFFICIENT FUNDS] {message}")
@@ -793,7 +796,7 @@ def balance_currencies(exchange, symbol, target_balance, min_precision=1, tolera
 
         if remaining_xrp_after_sell < target_balance:
             message = (
-                f"Selling {required_xrp_to_sell:.2f} XRP would drop balance below target of {target_balance} XRP."
+                f"Selling {required_xrp_to_sell:.2f} {CRYPTO_SYMBOL} would drop balance below target of {target_balance} {CRYPTO_SYMBOL}."
             )
             logging.warning(f"[INSUFFICIENT FUNDS] {message}")
             send_push_notification(f"[INSUFFICIENT FUNDS] {message}")
@@ -804,8 +807,13 @@ def balance_currencies(exchange, symbol, target_balance, min_precision=1, tolera
         amount_to_buy = required_xrp
         cost = amount_to_buy * current_price
 
-        logging.info(f"[TRADE] Buying {amount_to_buy:.2f} XRP for {cost:.2f} USDT.")
-        order = exchange.create_market_buy_order(symbol, amount_to_buy)
+        logging.info(f"[TRADE] Buying {amount_to_buy:.2f} {CRYPTO_SYMBOL} for {cost:.2f} {CRYPTO_CURRENCY}.")
+        
+        if EXCHANGE_NAME == 'binance':
+            order = exchange.create_market_buy_order(symbol, amount_to_buy)
+        else:
+            params = {'createMarketBuyOrderRequiresPrice': False}
+            order = exchange.create_market_buy_order(symbol, cost, params=params)
 
         # Ενημέρωση των balances
         free_base += amount_to_buy
@@ -814,14 +822,14 @@ def balance_currencies(exchange, symbol, target_balance, min_precision=1, tolera
     elif need_more_usdt:
         amount_to_sell = required_usdt / current_price
 
-        logging.info(f"[TRADE] Selling {amount_to_sell:.2f} XRP for {required_usdt:.2f} USDT.")
+        logging.info(f"[TRADE] Selling {amount_to_sell:.2f} {CRYPTO_SYMBOL} for {required_usdt:.2f} {CRYPTO_CURRENCY}.")
         order = exchange.create_market_sell_order(symbol, amount_to_sell)
 
         # Ενημέρωση των balances
         free_base -= amount_to_sell
         free_quote += required_usdt
 
-    logging.info(f"[FINAL BALANCE] XRP: {free_base:.2f}, USDT: {free_quote:.2f}")
+    logging.info(f"[FINAL BALANCE] {CRYPTO_SYMBOL}: {free_base:.2f}, {CRYPTO_CURRENCY}: {free_quote:.2f}")
 
     return {"base_balance": free_base, "quote_balance": free_quote}
 
@@ -869,9 +877,10 @@ def run_grid_trading_bot(AMOUNT):
     
 
     # Εξισσοροπηση ισορροπίας κεφαλαίων
-    logging.info("Checking currencies balances...")        
-    final_balances = balance_currencies(exchange, SYMBOL, TARGET_BALANCE)
-    logging.debug(f"Script completed. Final balances: {final_balances}")
+    if CHECK_BALANCE:
+        logging.info("Checking currencies balances...")        
+        final_balances = balance_currencies(exchange, EXCHANGE_NAME, SYMBOL, TARGET_BALANCE)
+        logging.debug(f"Script completed. Final balances: {final_balances}")
     
 
     # Φόρτωση παραγγελιών και στατιστικών από το αρχείο
