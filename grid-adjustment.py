@@ -8,7 +8,7 @@ import pushover
 
 # Configuration
 # Διαδρομές αρχείων συστήματος
-OPEN_ORDERS_FILE = "/opt/python/grid-trading-bot/open_orders.json"
+OPEN_ORDERS_FILE = "/opt/python/grid-trading-bot/worker_open_orders.json"
 JSON_PATH = "/opt/python/grid-trading-bot/config.json"
 PAUSE_FLAG_PATH = "/opt/python/grid-trading-bot/pause.flag"
 
@@ -615,7 +615,7 @@ def maintain_order_balance(exchange, current_price, buy_orders, sell_orders, new
                 if isinstance(order, dict) and 'id' in order and 'price' in order:
                     new_buy_orders.append({
                         "id": str(order['id']),
-                        "price": float(order['price']),
+                        "price": float(order['price']) if order.get('price') is not None else price,
                         "side": "buy",
                     })
                     logging.info(f"Placed new buy order at price: {price:.4f} to maintain order balance.")
@@ -662,7 +662,7 @@ def maintain_order_balance(exchange, current_price, buy_orders, sell_orders, new
                 if isinstance(order, dict) and 'id' in order and 'price' in order:
                     new_sell_orders.append({
                         "id": str(order['id']),
-                        "price": float(order['price']),
+                        "price": float(order['price']) if order.get('price') is not None else price,
                         "side": "sell",
                     })
                     logging.info(f"Placed new sell order at price: {price:.4f} to maintain order balance.")
